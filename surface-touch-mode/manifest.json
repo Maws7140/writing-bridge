@@ -1,0 +1,9 @@
+{
+  "id": "surface-touch-mode",
+  "name": "surface touch mode",
+  "version": "0.1.0",
+  "minAppVersion": "1.7.7",
+  "description": "Touch and pen shims for Surface-style Obsidian desktop use, with sidebar bypass controls.",
+  "author": "Maws",
+  "isDesktopOnly": true
+}

@@ -1,0 +1,9 @@
+{
+  "id": "tldraw-pen-bridge",
+  "name": "tldraw pen bridge",
+  "version": "0.5.11",
+  "minAppVersion": "1.7.7",
+  "description": "Surface pen commands, selection helpers, screenshot export, ruled lines, stroke recognition, and Gemini/OpenRouter transcription for tldraw and Excalidraw in Obsidian.",
+  "author": "Maws",
+  "isDesktopOnly": true
+}
