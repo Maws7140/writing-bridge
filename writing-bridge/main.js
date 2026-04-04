@@ -17,7 +17,7 @@ const INK_TLDRAW_EDITOR_PROPERTY = "__surfacePenBridgeTldrawEditor";
 const ACTIVE_INK_EDITOR_PROPERTY = "__surfacePenBridgeActiveInkEditor";
 const ACTIVE_INK_HOST_PROPERTY = "__surfacePenBridgeActiveInkHost";
 const ACTIVE_INK_EVENT = "surface-pen-bridge-ink-active";
-const TEMP_EXPORT_FOLDER = "_tldraw-pen-bridge-cache";
+const TEMP_EXPORT_FOLDER = "_writing-bridge-cache";
 const TEMP_EXPORT_FILE = normalizePath(`${TEMP_EXPORT_FOLDER}/selection.png`);
 const STROKE_REQUEST_FILE = normalizePath(`${TEMP_EXPORT_FOLDER}/stroke-request.json`);
 const DIRECT_TEXT_SHAPE_TYPES = new Set(["arrow", "geo", "note", "text"]);
@@ -67,7 +67,7 @@ const DEFAULT_SETTINGS = {
 const TOOL_COMMANDS = [
   {
     id: "surface-pen-draw",
-    name: "Surface Pen: Draw",
+    name: "Writing Bridge: Draw",
     hotkeyKey: "D",
     toolKey: "d",
     toolCode: "KeyD",
@@ -75,7 +75,7 @@ const TOOL_COMMANDS = [
   },
   {
     id: "surface-pen-select",
-    name: "Surface Pen: Select",
+    name: "Writing Bridge: Select",
     hotkeyKey: "S",
     toolKey: "v",
     toolCode: "KeyV",
@@ -83,7 +83,7 @@ const TOOL_COMMANDS = [
   },
   {
     id: "surface-pen-hand",
-    name: "Surface Pen: Hand",
+    name: "Writing Bridge: Hand",
     hotkeyKey: "H",
     toolKey: "h",
     toolCode: "KeyH",
@@ -93,22 +93,22 @@ const TOOL_COMMANDS = [
 
 const COPY_COMMAND = {
   id: "surface-pen-copy-selected-text",
-  name: "Surface Pen: Copy Selected As Text",
+  name: "Writing Bridge: Copy Selected As Text",
   hotkeyKey: "C",
 };
 
 const SCREENSHOT_COMMAND = {
   id: "surface-pen-copy-selected-screenshot",
-  name: "Surface Pen: Copy Selected Screenshot",
+  name: "Writing Bridge: Copy Selected Screenshot",
   hotkeyKey: "P",
 };
 
 const TOGGLE_RULED_PAGE_COMMAND = {
   id: "surface-pen-toggle-ruled-page",
-  name: "Surface Pen: Toggle Ruled Page",
+  name: "Writing Bridge: Toggle Ruled Page",
 };
 
-module.exports = class TldrawPenBridgePlugin extends Plugin {
+module.exports = class WritingBridgePlugin extends Plugin {
   async onload() {
     await this.loadSettings();
     this.copyInFlight = false;
@@ -135,7 +135,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
       this.registerToolCommand(command);
     }
 
-    this.addSettingTab(new TldrawPenBridgeSettingTab(this.app, this));
+    this.addSettingTab(new WritingBridgeSettingTab(this.app, this));
     this.registerCopyCommand();
     this.registerScreenshotCommand();
     this.installSelectionMenu();
@@ -934,9 +934,9 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
 
   installSelectionMenu() {
     const styleEl = document.createElement("style");
-    styleEl.setAttribute("data-tldraw-pen-bridge", "selection-menu");
+    styleEl.setAttribute("data-writing-bridge", "selection-menu");
     styleEl.textContent = `
-      .tldraw-pen-bridge-selection-menu {
+      .writing-bridge-selection-menu {
         position: fixed;
         z-index: 100000;
         display: none;
@@ -951,11 +951,11 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
         touch-action: manipulation;
       }
 
-      .tldraw-pen-bridge-selection-menu.is-visible {
+      .writing-bridge-selection-menu.is-visible {
         display: flex;
       }
 
-      .tldraw-pen-bridge-selection-menu button {
+      .writing-bridge-selection-menu button {
         appearance: none;
         border: 0;
         border-radius: 10px;
@@ -973,11 +973,11 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
         user-select: none;
       }
 
-      .tldraw-pen-bridge-selection-menu button:hover {
+      .writing-bridge-selection-menu button:hover {
         background: rgba(255, 255, 255, 0.16);
       }
 
-      .tldraw-pen-bridge-selection-menu button.tldraw-pen-bridge-selection-menu__primary {
+      .writing-bridge-selection-menu button.writing-bridge-selection-menu__primary {
         background: #2f7cf6;
         color: white;
       }
@@ -988,17 +988,17 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
 
   installStylePanelToggle() {
     const styleEl = document.createElement("style");
-    styleEl.setAttribute("data-tldraw-pen-bridge", "style-panel-toggle");
+    styleEl.setAttribute("data-writing-bridge", "style-panel-toggle");
     styleEl.textContent = `
-      .tldraw-view-root.tldraw-pen-bridge-style-panel-collapsed .tlui-style-panel {
+      .tldraw-view-root.writing-bridge-style-panel-collapsed .tlui-style-panel {
         display: none !important;
       }
 
-      .workspace-leaf-content[data-type="excalidraw"].tldraw-pen-bridge-style-panel-collapsed .selected-shape-actions {
+      .workspace-leaf-content[data-type="excalidraw"].writing-bridge-style-panel-collapsed .selected-shape-actions {
         display: none !important;
       }
 
-      .tldraw-pen-bridge-style-toggle {
+      .writing-bridge-style-toggle {
         position: fixed;
         z-index: 1400;
         appearance: none;
@@ -1021,15 +1021,15 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
         pointer-events: auto;
       }
 
-      .tldraw-pen-bridge-style-toggle:hover {
+      .writing-bridge-style-toggle:hover {
         background: rgba(36, 36, 42, 0.92);
       }
 
-      .tldraw-pen-bridge-style-toggle:active {
+      .writing-bridge-style-toggle:active {
         transform: translateY(1px);
       }
 
-      .tldraw-pen-bridge-style-toggle.is-open {
+      .writing-bridge-style-toggle.is-open {
         background: #2f7cf6;
         border-color: #2f7cf6;
         color: white;
@@ -1046,9 +1046,9 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
 
   installRuledPageOverlay() {
     const styleEl = document.createElement("style");
-    styleEl.setAttribute("data-tldraw-pen-bridge", "ruled-page");
+    styleEl.setAttribute("data-writing-bridge", "ruled-page");
     styleEl.textContent = `
-      .tldraw-pen-bridge-ruled-page {
+      .writing-bridge-ruled-page {
         position: absolute;
         left: ${-RULED_PAGE_EXTENT_PX}px;
         top: ${-RULED_PAGE_EXTENT_PX}px;
@@ -1060,29 +1060,29 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
         background-repeat: repeat;
         background-image: repeating-linear-gradient(
           to bottom,
-          var(--tldraw-pen-bridge-ruled-line) 0 var(--tldraw-pen-bridge-ruled-line-thickness, 1px),
-          transparent var(--tldraw-pen-bridge-ruled-line-thickness, 1px) var(--tldraw-pen-bridge-ruled-step, 40px)
+          var(--writing-bridge-ruled-line) 0 var(--writing-bridge-ruled-line-thickness, 1px),
+          transparent var(--writing-bridge-ruled-line-thickness, 1px) var(--writing-bridge-ruled-step, 40px)
         );
         transition: opacity 120ms ease;
       }
 
-      .theme-light .tldraw-pen-bridge-ruled-page,
-      .theme-light .tldraw-pen-bridge-excalidraw-ruled-page,
-      body:not(.theme-dark) .tldraw-pen-bridge-ruled-page,
-      body:not(.theme-dark) .tldraw-pen-bridge-excalidraw-ruled-page {
-        --tldraw-pen-bridge-ruled-line: rgba(74, 108, 184, 0.48);
+      .theme-light .writing-bridge-ruled-page,
+      .theme-light .writing-bridge-excalidraw-ruled-page,
+      body:not(.theme-dark) .writing-bridge-ruled-page,
+      body:not(.theme-dark) .writing-bridge-excalidraw-ruled-page {
+        --writing-bridge-ruled-line: rgba(74, 108, 184, 0.48);
       }
 
-      .theme-dark .tldraw-pen-bridge-ruled-page,
-      .theme-dark .tldraw-pen-bridge-excalidraw-ruled-page {
-        --tldraw-pen-bridge-ruled-line: rgba(158, 190, 255, 0.44);
+      .theme-dark .writing-bridge-ruled-page,
+      .theme-dark .writing-bridge-excalidraw-ruled-page {
+        --writing-bridge-ruled-line: rgba(158, 190, 255, 0.44);
       }
 
-      .tldraw-pen-bridge-ruled-page.is-visible {
+      .writing-bridge-ruled-page.is-visible {
         opacity: 1;
       }
 
-      .tldraw-pen-bridge-excalidraw-ruled-page {
+      .writing-bridge-excalidraw-ruled-page {
         position: absolute;
         inset: 0;
         pointer-events: none;
@@ -1091,26 +1091,26 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
         background-repeat: repeat;
         background-image: repeating-linear-gradient(
           to bottom,
-          var(--tldraw-pen-bridge-ruled-line) 0 var(--tldraw-pen-bridge-ruled-line-thickness, 1px),
-          transparent var(--tldraw-pen-bridge-ruled-line-thickness, 1px) var(--tldraw-pen-bridge-ruled-step, 40px)
+          var(--writing-bridge-ruled-line) 0 var(--writing-bridge-ruled-line-thickness, 1px),
+          transparent var(--writing-bridge-ruled-line-thickness, 1px) var(--writing-bridge-ruled-step, 40px)
         );
         transition: opacity 120ms ease;
       }
 
-      .tldraw-pen-bridge-excalidraw-ruled-page.is-visible {
+      .writing-bridge-excalidraw-ruled-page.is-visible {
         opacity: 1;
       }
 
-      .tldraw-pen-bridge-excalidraw-theme-match .excalidraw,
-      .tldraw-pen-bridge-excalidraw-theme-match .excalidraw .App-menu_top,
-      .tldraw-pen-bridge-excalidraw-theme-match.excalidraw-md-host {
+      .writing-bridge-excalidraw-theme-match .excalidraw,
+      .writing-bridge-excalidraw-theme-match .excalidraw .App-menu_top,
+      .writing-bridge-excalidraw-theme-match.excalidraw-md-host {
         background-color: var(
-          --tldraw-pen-bridge-excalidraw-bg,
+          --writing-bridge-excalidraw-bg,
           var(--background-primary)
         ) !important;
       }
 
-      .tldraw-pen-bridge-ruled-toggle {
+      .writing-bridge-ruled-toggle {
         position: fixed;
         z-index: 1400;
         appearance: none;
@@ -1132,26 +1132,26 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
         user-select: none;
       }
 
-      .tldraw-pen-bridge-ruled-toggle:hover {
+      .writing-bridge-ruled-toggle:hover {
         background: rgba(36, 36, 42, 0.92);
       }
 
-      .tldraw-pen-bridge-ruled-toggle.is-on {
+      .writing-bridge-ruled-toggle.is-on {
         background: rgba(47, 124, 246, 0.92);
         border-color: rgba(47, 124, 246, 1);
         color: white;
       }
 
-      .tldraw-pen-bridge-ruled-toggle.is-off {
+      .writing-bridge-ruled-toggle.is-off {
         opacity: 0.72;
       }
 
-      .tldraw-pen-bridge-ruled-toggle[data-target-kind="excalidraw"] {
+      .writing-bridge-ruled-toggle[data-target-kind="excalidraw"] {
         position: absolute;
         z-index: 24;
       }
 
-      .tldraw-pen-bridge-excalidraw-ruled-host {
+      .writing-bridge-excalidraw-ruled-host {
         position: relative !important;
         overflow: hidden;
       }
@@ -1159,7 +1159,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
       /* Keep this cheap.
          If the note already has an exported Excalidraw image, CSS can hang the
          edit affordance there without us stitching extra DOM into the page. */
-      .tldraw-pen-bridge-excalidraw-embed-actions {
+      .writing-bridge-excalidraw-embed-actions {
         margin-top: 6px;
         margin-bottom: 4px;
         display: flex;
@@ -1170,12 +1170,12 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
         color: var(--text-muted);
       }
 
-      .tldraw-pen-bridge-excalidraw-embed-label {
+      .writing-bridge-excalidraw-embed-label {
         color: var(--text-faint);
         letter-spacing: 0.01em;
       }
 
-      .tldraw-pen-bridge-excalidraw-embed-edit-link {
+      .writing-bridge-excalidraw-embed-edit-link {
         position: static;
         appearance: none;
         border: 0;
@@ -1194,11 +1194,11 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
         pointer-events: auto;
       }
 
-      .tldraw-pen-bridge-excalidraw-embed-edit-link:hover {
+      .writing-bridge-excalidraw-embed-edit-link:hover {
         color: var(--text-accent-hover, var(--text-accent));
       }
 
-      .tldraw-pen-bridge-excalidraw-embed-edit-link:active {
+      .writing-bridge-excalidraw-embed-edit-link:active {
         color: var(--text-normal);
       }
     `;
@@ -1264,7 +1264,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
     }
 
     const canvas = root.querySelector(".tl-canvas");
-    const existing = root.querySelector(".tldraw-pen-bridge-ruled-page");
+    const existing = root.querySelector(".writing-bridge-ruled-page");
     if (!(canvas instanceof HTMLElement) || !this.settings.ruledPageEnabled) {
       if (existing instanceof HTMLElement) {
         existing.remove();
@@ -1310,15 +1310,15 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
 
   createRuledPageOverlay() {
     const overlay = document.createElement("div");
-    overlay.className = "tldraw-pen-bridge-ruled-page";
+    overlay.className = "writing-bridge-ruled-page";
     overlay.setAttribute("aria-hidden", "true");
     return overlay;
   }
 
   applyRuledPageOverlayState(overlay, { stepPx, offsetPx, lineThicknessPx, visible }) {
-    overlay.style.setProperty("--tldraw-pen-bridge-ruled-step", `${stepPx}px`);
+    overlay.style.setProperty("--writing-bridge-ruled-step", `${stepPx}px`);
     overlay.style.setProperty(
-      "--tldraw-pen-bridge-ruled-line-thickness",
+      "--writing-bridge-ruled-line-thickness",
       `${lineThicknessPx ?? 1}px`
     );
     overlay.style.backgroundPosition = `0 ${offsetPx}px`;
@@ -1334,19 +1334,19 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
   }
 
   destroyRuledPageUi() {
-    for (const overlay of document.querySelectorAll(".tldraw-pen-bridge-ruled-page")) {
+    for (const overlay of document.querySelectorAll(".writing-bridge-ruled-page")) {
       if (overlay instanceof HTMLElement) {
         overlay.remove();
       }
     }
 
-    for (const overlay of document.querySelectorAll(".tldraw-pen-bridge-excalidraw-ruled-page")) {
+    for (const overlay of document.querySelectorAll(".writing-bridge-excalidraw-ruled-page")) {
       if (overlay instanceof HTMLElement) {
         overlay.remove();
       }
     }
 
-    for (const button of document.querySelectorAll(".tldraw-pen-bridge-ruled-toggle")) {
+    for (const button of document.querySelectorAll(".writing-bridge-ruled-toggle")) {
       if (button instanceof HTMLElement) {
         button.remove();
       }
@@ -1354,13 +1354,13 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
 
     this.appliedTldrawDrawSizeByRootId.clear();
 
-    for (const el of document.querySelectorAll(".tldraw-pen-bridge-edit-shadow-host")) {
+    for (const el of document.querySelectorAll(".writing-bridge-edit-shadow-host")) {
       if (el instanceof HTMLElement) {
         el.remove();
       }
     }
 
-    for (const el of document.querySelectorAll(".tldraw-pen-bridge-excalidraw-embed-actions")) {
+    for (const el of document.querySelectorAll(".writing-bridge-excalidraw-embed-actions")) {
       if (el instanceof HTMLElement) {
         el.remove();
       }
@@ -1381,7 +1381,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
       this.syncRuledPageToggle(root, activeRoot);
     }
 
-    for (const button of document.querySelectorAll(".tldraw-pen-bridge-ruled-toggle")) {
+    for (const button of document.querySelectorAll(".writing-bridge-ruled-toggle")) {
       if (!(button instanceof HTMLElement)) {
         continue;
       }
@@ -1402,7 +1402,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
     const canvas = root.querySelector(".tl-canvas");
     const rootId = this.ensureStyleToggleRootId(root);
     const existing = document.querySelector(
-      `.tldraw-pen-bridge-ruled-toggle[data-root-id="${rootId}"]`
+      `.writing-bridge-ruled-toggle[data-root-id="${rootId}"]`
     );
 
     if (!(canvas instanceof HTMLElement) || activeRoot !== root) {
@@ -1436,7 +1436,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
   createRuledPageToggleButton() {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "tldraw-pen-bridge-ruled-toggle";
+    button.className = "writing-bridge-ruled-toggle";
     button.addEventListener("pointerup", (event) => {
       event.stopPropagation();
       event.preventDefault();
@@ -1554,29 +1554,29 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
     this.applyExcalidrawThemeClasses(root, desiredTheme, shouldMatch);
 
     if (root instanceof HTMLElement) {
-      root.classList.toggle("tldraw-pen-bridge-excalidraw-theme-match", shouldMatch);
+      root.classList.toggle("writing-bridge-excalidraw-theme-match", shouldMatch);
       if (shouldMatch) {
-        root.style.setProperty("--tldraw-pen-bridge-excalidraw-bg", backgroundColor);
+        root.style.setProperty("--writing-bridge-excalidraw-bg", backgroundColor);
       } else {
-        root.style.removeProperty("--tldraw-pen-bridge-excalidraw-bg");
+        root.style.removeProperty("--writing-bridge-excalidraw-bg");
       }
     }
 
     if (wrapper instanceof HTMLElement) {
-      wrapper.classList.toggle("tldraw-pen-bridge-excalidraw-theme-match", shouldMatch);
+      wrapper.classList.toggle("writing-bridge-excalidraw-theme-match", shouldMatch);
       if (shouldMatch) {
-        wrapper.style.setProperty("--tldraw-pen-bridge-excalidraw-bg", backgroundColor);
+        wrapper.style.setProperty("--writing-bridge-excalidraw-bg", backgroundColor);
       } else {
-        wrapper.style.removeProperty("--tldraw-pen-bridge-excalidraw-bg");
+        wrapper.style.removeProperty("--writing-bridge-excalidraw-bg");
       }
     }
 
     if (host instanceof HTMLElement) {
-      host.classList.toggle("tldraw-pen-bridge-excalidraw-theme-match", shouldMatch);
+      host.classList.toggle("writing-bridge-excalidraw-theme-match", shouldMatch);
       if (shouldMatch) {
-        host.style.setProperty("--tldraw-pen-bridge-excalidraw-bg", backgroundColor);
+        host.style.setProperty("--writing-bridge-excalidraw-bg", backgroundColor);
       } else {
-        host.style.removeProperty("--tldraw-pen-bridge-excalidraw-bg");
+        host.style.removeProperty("--writing-bridge-excalidraw-bg");
       }
     }
 
@@ -1594,11 +1594,11 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
         continue;
       }
 
-      host.classList.toggle("tldraw-pen-bridge-excalidraw-theme-match", shouldMatch);
+      host.classList.toggle("writing-bridge-excalidraw-theme-match", shouldMatch);
       if (shouldMatch) {
-        host.style.setProperty("--tldraw-pen-bridge-excalidraw-bg", backgroundColor);
+        host.style.setProperty("--writing-bridge-excalidraw-bg", backgroundColor);
       } else {
-        host.style.removeProperty("--tldraw-pen-bridge-excalidraw-bg");
+        host.style.removeProperty("--writing-bridge-excalidraw-bg");
       }
     }
   }
@@ -1700,23 +1700,23 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
   }
 
   clearExcalidrawThemeMatching() {
-    for (const element of document.querySelectorAll(".tldraw-pen-bridge-excalidraw-theme-match")) {
+    for (const element of document.querySelectorAll(".writing-bridge-excalidraw-theme-match")) {
       if (!(element instanceof HTMLElement)) {
         continue;
       }
 
-      element.classList.remove("tldraw-pen-bridge-excalidraw-theme-match");
-      element.style.removeProperty("--tldraw-pen-bridge-excalidraw-bg");
+      element.classList.remove("writing-bridge-excalidraw-theme-match");
+      element.style.removeProperty("--writing-bridge-excalidraw-bg");
     }
 
-    for (const element of document.querySelectorAll(".tldraw-pen-bridge-excalidraw-force-theme")) {
+    for (const element of document.querySelectorAll(".writing-bridge-excalidraw-force-theme")) {
       if (!(element instanceof HTMLElement)) {
         continue;
       }
 
-      element.classList.remove("tldraw-pen-bridge-excalidraw-force-theme", "theme--dark", "theme--light");
+      element.classList.remove("writing-bridge-excalidraw-force-theme", "theme--dark", "theme--light");
       element.style.removeProperty("color-scheme");
-      element.removeAttribute("data-tldraw-pen-bridge-theme");
+      element.removeAttribute("data-writing-bridge-theme");
     }
 
     this.excalidrawThemeStateByRootId.clear();
@@ -1760,25 +1760,25 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
     for (const element of targets) {
       element.classList.remove(oppositeThemeClass);
       if (shouldMatch) {
-        element.classList.add("tldraw-pen-bridge-excalidraw-force-theme", themeClass);
+        element.classList.add("writing-bridge-excalidraw-force-theme", themeClass);
         element.style.setProperty("color-scheme", desiredTheme);
         element.dataset.tldrawPenBridgeTheme = desiredTheme;
       } else {
-        element.classList.remove("tldraw-pen-bridge-excalidraw-force-theme", themeClass);
+        element.classList.remove("writing-bridge-excalidraw-force-theme", themeClass);
         element.style.removeProperty("color-scheme");
-        element.removeAttribute("data-tldraw-pen-bridge-theme");
+        element.removeAttribute("data-writing-bridge-theme");
       }
     }
   }
 
   syncExcalidrawEmbedEditButtons() {
-    for (const shadowHost of document.querySelectorAll(".tldraw-pen-bridge-edit-shadow-host")) {
+    for (const shadowHost of document.querySelectorAll(".writing-bridge-edit-shadow-host")) {
       if (shadowHost instanceof HTMLElement) {
         shadowHost.remove();
       }
     }
 
-    for (const overlayRoot of document.querySelectorAll(".tldraw-pen-bridge-excalidraw-embed-overlay-root")) {
+    for (const overlayRoot of document.querySelectorAll(".writing-bridge-excalidraw-embed-overlay-root")) {
       if (overlayRoot instanceof HTMLElement) {
         overlayRoot.remove();
       }
@@ -1787,7 +1787,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
     const candidates = this.getExcalidrawEmbedEditCandidates();
     const activeAnchorIds = new Set(candidates.map((candidate) => candidate.anchorId));
 
-    for (const row of document.querySelectorAll(".tldraw-pen-bridge-excalidraw-embed-actions")) {
+    for (const row of document.querySelectorAll(".writing-bridge-excalidraw-embed-actions")) {
       if (
         row instanceof HTMLElement &&
         (!row.dataset.anchorId || !activeAnchorIds.has(row.dataset.anchorId))
@@ -1851,7 +1851,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
     }
 
     this.excalidrawEmbedButtonId += 1;
-    const anchorId = `tldraw-pen-bridge-embed-${this.excalidrawEmbedButtonId}`;
+    const anchorId = `writing-bridge-embed-${this.excalidrawEmbedButtonId}`;
     element.dataset.tldrawPenBridgeEmbedId = anchorId;
     return anchorId;
   }
@@ -1932,11 +1932,11 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
       return null;
     }
 
-    const selector = `.tldraw-pen-bridge-excalidraw-embed-actions[data-anchor-id="${anchorId}"]`;
+    const selector = `.writing-bridge-excalidraw-embed-actions[data-anchor-id="${anchorId}"]`;
     const duplicates = Array.from(document.querySelectorAll(selector)).filter((el) => el instanceof HTMLDivElement);
     const existing = duplicates[0] instanceof HTMLDivElement ? duplicates[0] : null;
     const row = existing instanceof HTMLDivElement ? existing : document.createElement("div");
-    row.className = "tldraw-pen-bridge-excalidraw-embed-actions";
+    row.className = "writing-bridge-excalidraw-embed-actions";
     row.dataset.anchorId = anchorId;
     row.dataset.sourcePath = file.path;
 
@@ -1944,19 +1944,19 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
       duplicate.remove();
     }
 
-    let label = row.querySelector(".tldraw-pen-bridge-excalidraw-embed-label");
+    let label = row.querySelector(".writing-bridge-excalidraw-embed-label");
     if (!(label instanceof HTMLSpanElement)) {
       label = document.createElement("span");
-      label.className = "tldraw-pen-bridge-excalidraw-embed-label";
+      label.className = "writing-bridge-excalidraw-embed-label";
       label.textContent = "Excalidraw";
       row.appendChild(label);
     }
 
-    let link = row.querySelector(".tldraw-pen-bridge-excalidraw-embed-edit-link");
+    let link = row.querySelector(".writing-bridge-excalidraw-embed-edit-link");
     if (!(link instanceof HTMLAnchorElement)) {
       link = document.createElement("a");
       link.href = "#";
-      link.className = "tldraw-pen-bridge-excalidraw-embed-edit-link";
+      link.className = "writing-bridge-excalidraw-embed-edit-link";
       link.textContent = "Edit in Excalidraw";
       const stopEvent = (event) => {
         event.preventDefault();
@@ -1999,13 +1999,13 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
       return null;
     }
 
-    const existing = overlayHost.querySelector(".tldraw-pen-bridge-excalidraw-embed-overlay-root");
+    const existing = overlayHost.querySelector(".writing-bridge-excalidraw-embed-overlay-root");
     if (existing instanceof HTMLDivElement) {
       return existing;
     }
 
     const overlayRoot = document.createElement("div");
-    overlayRoot.className = "tldraw-pen-bridge-excalidraw-embed-overlay-root";
+    overlayRoot.className = "writing-bridge-excalidraw-embed-overlay-root";
     overlayHost.appendChild(overlayRoot);
     return overlayRoot;
   }
@@ -2023,10 +2023,10 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
       return null;
     }
 
-    const existing = overlayRoot.querySelector(".tldraw-pen-bridge-excalidraw-embed-edit-button");
+    const existing = overlayRoot.querySelector(".writing-bridge-excalidraw-embed-edit-button");
     const button = existing instanceof HTMLButtonElement ? existing : document.createElement("button");
     button.type = "button";
-    button.className = "tldraw-pen-bridge-excalidraw-embed-edit-button";
+    button.className = "writing-bridge-excalidraw-embed-edit-button";
     button.textContent = "Edit";
     button.dataset.sourcePath = file instanceof TFile ? file.path : "";
     if (!button.isConnected) {
@@ -2198,7 +2198,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
       return null;
     }
 
-    const existing = host.querySelector(".tldraw-pen-bridge-edit-shadow-host");
+    const existing = host.querySelector(".writing-bridge-edit-shadow-host");
     if (existing instanceof HTMLElement) {
       existing.dataset.sourcePath = file.path;
       return existing;
@@ -2208,7 +2208,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
     // Closed shadow DOM keeps the Edit hitbox from bubbling back into whatever
     // is listening on the outer embed shell.
     const shadowHost = document.createElement("div");
-    shadowHost.className = "tldraw-pen-bridge-edit-shadow-host";
+    shadowHost.className = "writing-bridge-edit-shadow-host";
     shadowHost.dataset.sourcePath = file.path;
 
     const shadow = shadowHost.attachShadow({ mode: "closed" });
@@ -2469,7 +2469,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
 
     const host = this.findExcalidrawRuledPageHost(root);
     this.clearStaleExcalidrawRuledPageHosts(root, host);
-    const existing = root.querySelector(".tldraw-pen-bridge-excalidraw-ruled-page");
+    const existing = root.querySelector(".writing-bridge-excalidraw-ruled-page");
     if (!(host instanceof HTMLElement) || !this.settings.ruledPageEnabled) {
       if (existing instanceof HTMLElement) {
         existing.remove();
@@ -2479,7 +2479,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
 
     const overlay =
       existing instanceof HTMLDivElement ? existing : this.createExcalidrawRuledPageOverlay();
-    host.classList.add("tldraw-pen-bridge-excalidraw-ruled-host");
+    host.classList.add("writing-bridge-excalidraw-ruled-host");
     if (!overlay.isConnected) {
       host.appendChild(overlay);
     } else if (overlay.parentElement !== host) {
@@ -2499,7 +2499,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
 
   createExcalidrawRuledPageOverlay() {
     const overlay = document.createElement("div");
-    overlay.className = "tldraw-pen-bridge-excalidraw-ruled-page";
+    overlay.className = "writing-bridge-excalidraw-ruled-page";
     overlay.setAttribute("aria-hidden", "true");
     return overlay;
   }
@@ -2592,7 +2592,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
       this.syncExcalidrawRuledPageToggle(root, activeRoot);
     }
 
-    for (const button of document.querySelectorAll('.tldraw-pen-bridge-ruled-toggle[data-target-kind="excalidraw"]')) {
+    for (const button of document.querySelectorAll('.writing-bridge-ruled-toggle[data-target-kind="excalidraw"]')) {
       if (!(button instanceof HTMLElement)) {
         continue;
       }
@@ -2604,7 +2604,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
   }
 
   destroyExcalidrawRuledPageToggles() {
-    for (const button of document.querySelectorAll('.tldraw-pen-bridge-ruled-toggle[data-target-kind="excalidraw"]')) {
+    for (const button of document.querySelectorAll('.writing-bridge-ruled-toggle[data-target-kind="excalidraw"]')) {
       if (button instanceof HTMLElement) {
         button.remove();
       }
@@ -2619,7 +2619,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
     const wrapper = this.findExcalidrawContainer(root);
     const rootId = this.ensureStyleToggleRootId(root);
     const existing = root.querySelector(
-      `.tldraw-pen-bridge-ruled-toggle[data-root-id="${rootId}"][data-target-kind="excalidraw"]`
+      `.writing-bridge-ruled-toggle[data-root-id="${rootId}"][data-target-kind="excalidraw"]`
     );
 
     if (!(wrapper instanceof HTMLElement) || activeRoot !== root) {
@@ -2717,7 +2717,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
   }
 
   destroyExcalidrawStylePanelToggles() {
-    for (const button of document.querySelectorAll('.tldraw-pen-bridge-style-toggle[data-target-kind="excalidraw"]')) {
+    for (const button of document.querySelectorAll('.writing-bridge-style-toggle[data-target-kind="excalidraw"]')) {
       if (button instanceof HTMLElement) {
         button.remove();
       }
@@ -2725,7 +2725,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
 
     for (const root of document.querySelectorAll('.workspace-leaf-content[data-type="excalidraw"]')) {
       if (root instanceof HTMLElement) {
-        root.classList.remove("tldraw-pen-bridge-style-panel-collapsed");
+        root.classList.remove("writing-bridge-style-panel-collapsed");
       }
     }
   }
@@ -2736,14 +2736,14 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
     }
 
     root.classList.toggle(
-      "tldraw-pen-bridge-style-panel-collapsed",
+      "writing-bridge-style-panel-collapsed",
       Boolean(this.settings.stylePanelCollapsed)
     );
 
     const panel = root.querySelector(".selected-shape-actions");
     const rootId = this.ensureStyleToggleRootId(root);
     const existing = document.querySelector(
-      `.tldraw-pen-bridge-style-toggle[data-root-id="${rootId}"][data-target-kind="excalidraw"]`
+      `.writing-bridge-style-toggle[data-root-id="${rootId}"][data-target-kind="excalidraw"]`
     );
 
     if (!(panel instanceof HTMLElement) || activeRoot !== root) {
@@ -2958,7 +2958,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
       this.syncStylePanelToggle(root);
     }
 
-    for (const button of document.querySelectorAll(".tldraw-pen-bridge-style-toggle")) {
+    for (const button of document.querySelectorAll(".writing-bridge-style-toggle")) {
       if (!(button instanceof HTMLElement)) {
         continue;
       }
@@ -2977,14 +2977,14 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
     }
 
     root.classList.toggle(
-      "tldraw-pen-bridge-style-panel-collapsed",
+      "writing-bridge-style-panel-collapsed",
       Boolean(this.settings.stylePanelCollapsed)
     );
 
     const panel = root.querySelector(".tlui-style-panel");
     const rootId = this.ensureStyleToggleRootId(root);
     const existing = document.querySelector(
-      `.tldraw-pen-bridge-style-toggle[data-root-id="${rootId}"]`
+      `.writing-bridge-style-toggle[data-root-id="${rootId}"]`
     );
 
     if (!(panel instanceof HTMLElement)) {
@@ -3017,7 +3017,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
   createStylePanelToggleButton() {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "tldraw-pen-bridge-style-toggle";
+    button.className = "writing-bridge-style-toggle";
     button.addEventListener("pointerup", (event) => {
       event.stopPropagation();
       event.preventDefault();
@@ -3036,7 +3036,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
     }
 
     this.stylePanelToggleId += 1;
-    const rootId = `tldraw-pen-bridge-root-${this.stylePanelToggleId}`;
+    const rootId = `writing-bridge-root-${this.stylePanelToggleId}`;
     root.dataset.tldrawPenBridgeRootId = rootId;
     return rootId;
   }
@@ -3080,7 +3080,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
   }
 
   destroyStylePanelToggles() {
-    for (const button of document.querySelectorAll(".tldraw-pen-bridge-style-toggle")) {
+    for (const button of document.querySelectorAll(".writing-bridge-style-toggle")) {
       if (button instanceof HTMLElement) {
         button.remove();
       }
@@ -3088,13 +3088,13 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
 
     for (const root of document.querySelectorAll(".tldraw-view-root")) {
       if (root instanceof HTMLElement) {
-        root.classList.remove("tldraw-pen-bridge-style-panel-collapsed");
+        root.classList.remove("writing-bridge-style-panel-collapsed");
       }
     }
 
     for (const root of document.querySelectorAll('.workspace-leaf-content[data-type="excalidraw"]')) {
       if (root instanceof HTMLElement) {
-        root.classList.remove("tldraw-pen-bridge-style-panel-collapsed");
+        root.classList.remove("writing-bridge-style-panel-collapsed");
       }
     }
   }
@@ -3160,7 +3160,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
     }
 
     const menu = document.createElement("div");
-    menu.className = "tldraw-pen-bridge-selection-menu";
+    menu.className = "writing-bridge-selection-menu";
 
     const copyButton = this.createSelectionMenuButton(
       "Copy",
@@ -3168,7 +3168,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
         this.dismissSelectionMenu(menu);
         await this.copySelectedAsText(this.lastActiveCanvasTarget ?? this.getCanvasTarget());
       },
-      "tldraw-pen-bridge-selection-menu__primary"
+      "writing-bridge-selection-menu__primary"
     );
     const cutButton = this.createSelectionMenuButton("Cut", async () => {
       this.dismissSelectionMenu(menu);
@@ -4862,7 +4862,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
 
     const requestPath = this.getVaultAbsolutePath(STROKE_REQUEST_FILE);
     const helperPath = this.getVaultAbsolutePath(
-      normalizePath(`${this.app.vault.configDir}/plugins/tldraw-pen-bridge/runtime/${INK_HELPER_EXE}`)
+      normalizePath(`${this.app.vault.configDir}/plugins/writing-bridge/runtime/${INK_HELPER_EXE}`)
     );
 
     if (!fs.existsSync(helperPath)) {
@@ -5244,8 +5244,8 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
-        "HTTP-Referer": "obsidian://tldraw-pen-bridge",
-        "X-Title": "tldraw pen bridge",
+        "HTTP-Referer": "obsidian://writing-bridge",
+        "X-Title": "writing bridge",
       },
       body: JSON.stringify(requestBody),
     });
@@ -5623,12 +5623,12 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
       return;
     }
 
-    for (const host of root.querySelectorAll(".tldraw-pen-bridge-excalidraw-ruled-host")) {
+    for (const host of root.querySelectorAll(".writing-bridge-excalidraw-ruled-host")) {
       if (!(host instanceof HTMLElement) || host === activeHost) {
         continue;
       }
 
-      host.classList.remove("tldraw-pen-bridge-excalidraw-ruled-host");
+      host.classList.remove("writing-bridge-excalidraw-ruled-host");
     }
   }
 
@@ -5808,7 +5808,7 @@ module.exports = class TldrawPenBridgePlugin extends Plugin {
         rootPath,
         this.app.vault.configDir,
         "plugins",
-        "tldraw-pen-bridge",
+        "writing-bridge",
         "bridge.log"
       );
       fs.mkdirSync(path.dirname(logPath), { recursive: true });
@@ -5875,7 +5875,7 @@ function float16BitsToNumber(bits) {
   return sign ? -magnitude : magnitude;
 }
 
-class TldrawPenBridgeSettingTab extends PluginSettingTab {
+class WritingBridgeSettingTab extends PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
