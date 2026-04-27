@@ -28,7 +28,12 @@ const STYLE_PANEL_SYNC_MS = 500;
 const TLDRAW_SIZE_STYLE = { id: "tldraw:size", defaultValue: "m" };
 const TLDRAW_DRAW_SIZE_OPTIONS = ["default", "s", "m", "l", "xl"];
 const RULED_PAGE_GRID_MULTIPLIER = 5;
-const RULED_PAGE_MIN_STEP_PX = 8;
+const SIDEBAR_PEN_TAP_MAX_TRAVEL_PX = 18;
+const SIDEBAR_PEN_TAP_MAX_DURATION_MS = 1200;
+const SIDEBAR_PEN_REPLAY_DELAY_MS = 32;
+const RULED_PAGE_MIN_SCREEN_STEP_PX = 12;
+const RULED_PAGE_FULL_OPACITY_STEP_PX = 20;
+const RULED_PAGE_MIN_OPACITY = 0.55;
 const RULED_PAGE_LINE_THICKNESS_PX = 1;
 const RULED_PAGE_EXTENT_PX = 24000;
 const SCREENSHOT_EXPORT_PADDING = 8;
@@ -47,6 +52,7 @@ const OPENROUTER_DEFAULT_MODELS = [
   "moonshotai/kimi-vl-a3b-thinking:free",
   "qwen/qwen2.5-vl-32b-instruct:free",
 ];
+const TLDRAW_EMBED_PREVIEW_FORMAT_OPTIONS = ["png", "svg", "default"];
 const FLOAT16_POW2 = Array.from({ length: 31 }, (_, index) => Math.pow(2, index - 15));
 const FLOAT16_POW2_SUBNORMAL = Math.pow(2, -14) / 1024;
 const FLOAT16_MANTISSA = Array.from({ length: 1024 }, (_, index) => 1 + index / 1024);
@@ -58,6 +64,7 @@ const DEFAULT_SETTINGS = {
   geminiApiKey: "",
   geminiModel: GEMINI_DEFAULT_MODEL,
   tldrawDefaultDrawSize: "s",
+  tldrawEmbedPreviewFormat: "png",
   stylePanelCollapsed: true,
   ruledPageEnabled: true,
   matchExcalidrawThemeToObsidian: true,
@@ -122,9 +129,16 @@ module.exports = class WritingBridgePlugin extends Plugin {
     this.excalidrawEmbedButtonId = 0;
     this.pendingExcalidrawFloatingUiSyncFrame = 0;
     this.pendingExcalidrawThemeSyncTimeouts = new Set();
+    this.pendingSidebarPenReplayTimeouts = new Set();
+    this.tldrawEmbedPreviewObjectUrls = new Set();
+    this.tldrawEmbedPreviewObjectUrlByImage = new WeakMap();
+    this.tldrawEmbedPreviewSourceUrlByImage = new WeakMap();
+    this.tldrawEmbedPreviewConversionByImage = new WeakMap();
+    this.pendingTldrawEmbedPreviewSyncTimeout = 0;
     this.excalidrawFloatingUiTrackingUntil = 0;
     this.ruledPageStateByRootId = new Map();
     this.excalidrawThemeStateByRootId = new Map();
+    this.sidebarPenTapState = null;
     this.selectionMenuState = {
       dismissedSelectionKey: "",
       lastSelectionKey: "",
@@ -142,6 +156,8 @@ module.exports = class WritingBridgePlugin extends Plugin {
     this.installStylePanelToggle();
     this.registerRuledPageCommand();
     this.installRuledPageOverlay();
+    this.installSidebarPenAssist();
+    this.installTldrawEmbedPreviewFormatBridge();
     this.registerInterval(window.setInterval(() => this.refreshSelectionMenu(), SELECTION_MENU_POLL_MS));
     const refreshSelectionMenu = () => this.refreshSelectionMenu();
     window.addEventListener(ACTIVE_INK_EVENT, refreshSelectionMenu);
@@ -151,6 +167,18 @@ module.exports = class WritingBridgePlugin extends Plugin {
         window.clearTimeout(timeoutId);
       }
       this.pendingExcalidrawThemeSyncTimeouts.clear();
+      for (const timeoutId of this.pendingSidebarPenReplayTimeouts) {
+        window.clearTimeout(timeoutId);
+      }
+      this.pendingSidebarPenReplayTimeouts.clear();
+      if (this.pendingTldrawEmbedPreviewSyncTimeout) {
+        window.clearTimeout(this.pendingTldrawEmbedPreviewSyncTimeout);
+        this.pendingTldrawEmbedPreviewSyncTimeout = 0;
+      }
+      for (const url of this.tldrawEmbedPreviewObjectUrls) {
+        URL.revokeObjectURL(url);
+      }
+      this.tldrawEmbedPreviewObjectUrls.clear();
     });
     this.register(() => this.destroySelectionMenu());
   }
@@ -175,6 +203,10 @@ module.exports = class WritingBridgePlugin extends Plugin {
 
     if (!TLDRAW_DRAW_SIZE_OPTIONS.includes(this.settings.tldrawDefaultDrawSize)) {
       this.settings.tldrawDefaultDrawSize = DEFAULT_SETTINGS.tldrawDefaultDrawSize;
+    }
+
+    if (!TLDRAW_EMBED_PREVIEW_FORMAT_OPTIONS.includes(this.settings.tldrawEmbedPreviewFormat)) {
+      this.settings.tldrawEmbedPreviewFormat = DEFAULT_SETTINGS.tldrawEmbedPreviewFormat;
     }
   }
 
@@ -1056,7 +1088,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
         height: ${RULED_PAGE_EXTENT_PX * 2}px;
         pointer-events: none;
         z-index: 0;
-        opacity: 0;
+        --writing-bridge-ruled-visibility: 0;
+        --writing-bridge-ruled-density-opacity: 1;
+        opacity: calc(
+          var(--writing-bridge-ruled-visibility) * var(--writing-bridge-ruled-density-opacity)
+        );
         background-repeat: repeat;
         background-image: repeating-linear-gradient(
           to bottom,
@@ -1079,7 +1115,7 @@ module.exports = class WritingBridgePlugin extends Plugin {
       }
 
       .writing-bridge-ruled-page.is-visible {
-        opacity: 1;
+        --writing-bridge-ruled-visibility: 1;
       }
 
       .writing-bridge-excalidraw-ruled-page {
@@ -1087,7 +1123,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
         inset: 0;
         pointer-events: none;
         z-index: var(--zIndex-svgLayer, 3);
-        opacity: 0;
+        --writing-bridge-ruled-visibility: 0;
+        --writing-bridge-ruled-density-opacity: 1;
+        opacity: calc(
+          var(--writing-bridge-ruled-visibility) * var(--writing-bridge-ruled-density-opacity)
+        );
         background-repeat: repeat;
         background-image: repeating-linear-gradient(
           to bottom,
@@ -1098,7 +1138,7 @@ module.exports = class WritingBridgePlugin extends Plugin {
       }
 
       .writing-bridge-excalidraw-ruled-page.is-visible {
-        opacity: 1;
+        --writing-bridge-ruled-visibility: 1;
       }
 
       .writing-bridge-excalidraw-theme-match .excalidraw,
@@ -1248,6 +1288,274 @@ module.exports = class WritingBridgePlugin extends Plugin {
     this.register(() => this.destroyRuledPageUi());
   }
 
+  installSidebarPenAssist() {
+    const styleEl = document.createElement("style");
+    styleEl.setAttribute("data-writing-bridge", "sidebar-pen-assist");
+    styleEl.textContent = `
+      .workspace-ribbon .clickable-icon,
+      .workspace-ribbon button,
+      .workspace-tab-header,
+      .workspace-tab-header-inner,
+      .workspace-split.mod-left-split button,
+      .workspace-split.mod-right-split button,
+      .workspace-split.mod-left-split [role="button"],
+      .workspace-split.mod-right-split [role="button"],
+      .workspace-leaf-content[data-type="calculite"] button {
+        touch-action: manipulation;
+      }
+    `;
+    document.head.appendChild(styleEl);
+    this.register(() => styleEl.remove());
+
+    this.registerDomEvent(document, "pointerdown", (event) => this.handleSidebarPenPointerDown(event), {
+      capture: true,
+      passive: true,
+    });
+    this.registerDomEvent(document, "pointerup", (event) => this.handleSidebarPenPointerUp(event), {
+      capture: true,
+      passive: true,
+    });
+    this.registerDomEvent(document, "pointercancel", (event) => this.handleSidebarPenPointerCancel(event), {
+      capture: true,
+      passive: true,
+    });
+    this.registerDomEvent(document, "click", (event) => this.handleSidebarPenNativeClick(event), {
+      capture: true,
+      passive: true,
+    });
+  }
+
+  handleSidebarPenPointerDown(event) {
+    if (!this.isSidebarPenPointerEvent(event)) {
+      return;
+    }
+
+    const target = this.getSidebarPenInteractiveTarget(event.target);
+    if (!(target instanceof HTMLElement)) {
+      this.sidebarPenTapState = null;
+      return;
+    }
+
+    this.sidebarPenTapState = {
+      pointerId: event.pointerId,
+      target,
+      startedAt: Date.now(),
+      clientX: Number(event.clientX ?? 0),
+      clientY: Number(event.clientY ?? 0),
+      nativeClickSeen: false,
+    };
+  }
+
+  handleSidebarPenPointerUp(event) {
+    if (!this.isSidebarPenPointerEvent(event)) {
+      return;
+    }
+
+    const state = this.sidebarPenTapState;
+    if (!state || state.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const target =
+      this.getSidebarPenInteractiveTarget(event.target) ??
+      this.getSidebarPenInteractiveTarget(document.elementFromPoint(event.clientX, event.clientY));
+    if (!(target instanceof HTMLElement) || !this.isSameSidebarPenTarget(state.target, target)) {
+      if (this.sidebarPenTapState === state) {
+        this.sidebarPenTapState = null;
+      }
+      return;
+    }
+
+    const travelPx = Math.hypot(
+      Number(event.clientX ?? 0) - state.clientX,
+      Number(event.clientY ?? 0) - state.clientY
+    );
+    const durationMs = Date.now() - state.startedAt;
+    if (travelPx > SIDEBAR_PEN_TAP_MAX_TRAVEL_PX || durationMs > SIDEBAR_PEN_TAP_MAX_DURATION_MS) {
+      if (this.sidebarPenTapState === state) {
+        this.sidebarPenTapState = null;
+      }
+      return;
+    }
+
+    const replayEventState = {
+      clientX: Number(event.clientX ?? 0),
+      clientY: Number(event.clientY ?? 0),
+      ctrlKey: Boolean(event.ctrlKey),
+      altKey: Boolean(event.altKey),
+      shiftKey: Boolean(event.shiftKey),
+      metaKey: Boolean(event.metaKey),
+    };
+    const timeoutId = window.setTimeout(() => {
+      this.pendingSidebarPenReplayTimeouts.delete(timeoutId);
+      if (this.sidebarPenTapState === state) {
+        this.sidebarPenTapState = null;
+      }
+      if (state.nativeClickSeen) {
+        return;
+      }
+
+      this.replaySidebarPenTap(state.target, replayEventState);
+    }, SIDEBAR_PEN_REPLAY_DELAY_MS);
+    this.pendingSidebarPenReplayTimeouts.add(timeoutId);
+  }
+
+  handleSidebarPenPointerCancel(event) {
+    if (this.sidebarPenTapState?.pointerId === event.pointerId) {
+      this.sidebarPenTapState = null;
+    }
+  }
+
+  handleSidebarPenNativeClick(event) {
+    const state = this.sidebarPenTapState;
+    if (!state?.target || !(event.target instanceof Node)) {
+      return;
+    }
+
+    if (this.isSameSidebarPenTarget(state.target, event.target)) {
+      state.nativeClickSeen = true;
+    }
+  }
+
+  isSidebarPenPointerEvent(event) {
+    return (
+      event instanceof PointerEvent &&
+      (event.pointerType === "pen" || event.pointerType === "touch") &&
+      event.isPrimary !== false &&
+      Number(event.button ?? 0) === 0
+    );
+  }
+
+  getSidebarPenInteractiveTarget(target) {
+    if (!(target instanceof Element)) {
+      return null;
+    }
+
+    if (
+      target.closest(
+        [
+          ".tldraw-view-root",
+          ".tl-container",
+          ".excalidraw-wrapper",
+          ".excalidraw-view",
+          ".cm-editor",
+          ".modal",
+          ".menu",
+          ".suggestion-container",
+        ].join(", ")
+      )
+    ) {
+      return null;
+    }
+
+    const sidebarRegion = target.closest(
+      [
+        ".workspace-ribbon",
+        ".workspace-side-dock",
+        ".workspace-split.mod-left-split",
+        ".workspace-split.mod-right-split",
+        ".workspace-drawer",
+      ].join(", ")
+    );
+    if (!(sidebarRegion instanceof HTMLElement)) {
+      return null;
+    }
+
+    if (target.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""]')) {
+      return null;
+    }
+
+    const selectors = [
+      '.workspace-leaf-content[data-type="calculite"] button',
+      ".workspace-tab-header-status-icon",
+      ".workspace-tab-header",
+      ".workspace-tab-header-inner",
+      ".workspace-tab-container .clickable-icon",
+      ".workspace-ribbon-collapse-btn",
+      ".workspace-ribbon-tab",
+      ".side-dock-ribbon-action",
+      ".clickable-icon",
+      ".view-action",
+      ".nav-action-button",
+      ".tree-item-icon",
+      ".tree-item-inner",
+      ".tree-item-self",
+      "a",
+      '[role="button"]',
+      "button",
+    ];
+
+    for (const selector of selectors) {
+      const candidate = target.closest(selector);
+      if (candidate instanceof HTMLElement && sidebarRegion.contains(candidate)) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  isSameSidebarPenTarget(expectedTarget, actualTarget) {
+    return (
+      expectedTarget instanceof Node &&
+      actualTarget instanceof Node &&
+      (expectedTarget === actualTarget ||
+        expectedTarget.contains(actualTarget) ||
+        actualTarget.contains(expectedTarget))
+    );
+  }
+
+  replaySidebarPenTap(target, sourceEvent) {
+    if (!(target instanceof HTMLElement) || !target.isConnected) {
+      return;
+    }
+
+    const eventInit = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      clientX: Number(sourceEvent?.clientX ?? 0),
+      clientY: Number(sourceEvent?.clientY ?? 0),
+      ctrlKey: Boolean(sourceEvent?.ctrlKey),
+      altKey: Boolean(sourceEvent?.altKey),
+      shiftKey: Boolean(sourceEvent?.shiftKey),
+      metaKey: Boolean(sourceEvent?.metaKey),
+      button: 0,
+    };
+
+    target.focus?.({ preventScroll: true });
+    this.dispatchSidebarPenSyntheticPointerEvent(target, "pointerdown", {
+      ...eventInit,
+      buttons: 1,
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+    });
+    target.dispatchEvent(new MouseEvent("mousedown", { ...eventInit, buttons: 1 }));
+    this.dispatchSidebarPenSyntheticPointerEvent(target, "pointerup", {
+      ...eventInit,
+      buttons: 0,
+      pointerId: 1,
+      pointerType: "mouse",
+      isPrimary: true,
+    });
+    target.dispatchEvent(new MouseEvent("mouseup", { ...eventInit, buttons: 0 }));
+
+    if (typeof target.click === "function") {
+      target.click();
+    } else {
+      target.dispatchEvent(new MouseEvent("click", { ...eventInit, buttons: 0 }));
+    }
+  }
+
+  dispatchSidebarPenSyntheticPointerEvent(target, type, eventInit) {
+    if (!(target instanceof HTMLElement) || typeof PointerEvent === "undefined") {
+      return;
+    }
+
+    target.dispatchEvent(new PointerEvent(type, eventInit));
+  }
+
   syncRuledPageOverlays() {
     const roots = document.querySelectorAll(".tldraw-view-root");
     for (const root of roots) {
@@ -1315,14 +1623,34 @@ module.exports = class WritingBridgePlugin extends Plugin {
     return overlay;
   }
 
-  applyRuledPageOverlayState(overlay, { stepPx, offsetPx, lineThicknessPx, visible }) {
+  applyRuledPageOverlayState(overlay, { stepPx, offsetPx, lineThicknessPx, visible, opacity }) {
     overlay.style.setProperty("--writing-bridge-ruled-step", `${stepPx}px`);
     overlay.style.setProperty(
       "--writing-bridge-ruled-line-thickness",
       `${lineThicknessPx ?? 1}px`
     );
+    overlay.style.setProperty(
+      "--writing-bridge-ruled-density-opacity",
+      `${Math.max(0, Math.min(1, Number(opacity ?? 1) || 1))}`
+    );
     overlay.style.backgroundPosition = `0 ${offsetPx}px`;
     overlay.classList.toggle("is-visible", Boolean(visible));
+  }
+
+  getRuledPageOpacityForScreenStep(screenStepPx) {
+    const safeStepPx = Number(screenStepPx);
+    if (!Number.isFinite(safeStepPx) || safeStepPx >= RULED_PAGE_FULL_OPACITY_STEP_PX) {
+      return 1;
+    }
+
+    if (safeStepPx <= RULED_PAGE_MIN_SCREEN_STEP_PX) {
+      return RULED_PAGE_MIN_OPACITY;
+    }
+
+    const progress =
+      (safeStepPx - RULED_PAGE_MIN_SCREEN_STEP_PX) /
+      (RULED_PAGE_FULL_OPACITY_STEP_PX - RULED_PAGE_MIN_SCREEN_STEP_PX);
+    return RULED_PAGE_MIN_OPACITY + progress * (1 - RULED_PAGE_MIN_OPACITY);
   }
 
   async toggleRuledPageEnabled() {
@@ -2514,20 +2842,20 @@ module.exports = class WritingBridgePlugin extends Plugin {
 
     const appState = api.getAppState?.();
     const zoom = Number(appState?.zoom?.value ?? 1) || 1;
+    const safeZoom = zoom > 0 ? zoom : 1;
     const sceneGridSize = Number(appState?.gridStep ?? appState?.gridSize ?? 8) || 8;
-    const rawStepPx = Math.max(1, sceneGridSize * RULED_PAGE_GRID_MULTIPLIER * zoom);
-    const stepPx = Math.max(RULED_PAGE_MIN_STEP_PX, rawStepPx);
+    const rawStepPx = Math.max(1, sceneGridSize * RULED_PAGE_GRID_MULTIPLIER * safeZoom);
+    const stepPx = Math.max(RULED_PAGE_MIN_SCREEN_STEP_PX, rawStepPx);
     const sceneOriginViewport = this.excalidrawSceneToViewportCoords(view, { x: 0, y: 0 });
     const offsetPx = this.mod(Number(sceneOriginViewport?.y ?? 0), stepPx);
-    const lineThicknessPx = Math.max(
-      1.5,
-      Math.min(3, 1.5 * zoom)
-    );
+    const lineThicknessPx = Math.max(1, Math.min(3, 1.5 * safeZoom));
+    const opacity = this.getRuledPageOpacityForScreenStep(stepPx);
 
     return {
       stepPx,
       offsetPx,
       lineThicknessPx,
+      opacity,
       visible: true,
     };
   }
@@ -2874,15 +3202,20 @@ module.exports = class WritingBridgePlugin extends Plugin {
 
     const documentSettings = editor.getDocumentSettings();
     const gridSize = Number(documentSettings?.gridSize ?? 10);
+    const camera = typeof editor.getCamera === "function" ? editor.getCamera() : null;
+    const zoom = Number(camera?.z ?? camera?.zoom ?? 1) || 1;
+    const safeZoom = zoom > 0 ? zoom : 1;
     const rawStepPx = Math.max(1, gridSize * RULED_PAGE_GRID_MULTIPLIER);
-    const stepPx = Math.max(RULED_PAGE_MIN_STEP_PX, rawStepPx);
+    const stepPx = Math.max(rawStepPx, RULED_PAGE_MIN_SCREEN_STEP_PX / safeZoom);
     const offsetPx = 0;
-    const lineThicknessPx = RULED_PAGE_LINE_THICKNESS_PX;
+    const lineThicknessPx = Math.max(RULED_PAGE_LINE_THICKNESS_PX, RULED_PAGE_LINE_THICKNESS_PX / safeZoom);
+    const opacity = this.getRuledPageOpacityForScreenStep(stepPx * safeZoom);
 
     return {
       stepPx,
       offsetPx,
       lineThicknessPx,
+      opacity,
       visible: true,
     };
   }
@@ -2890,6 +3223,23 @@ module.exports = class WritingBridgePlugin extends Plugin {
   getConfiguredTldrawDefaultDrawSize() {
     const size = this.settings?.tldrawDefaultDrawSize;
     return size && size !== "default" && TLDRAW_DRAW_SIZE_OPTIONS.includes(size) ? size : null;
+  }
+
+  getCurrentTldrawDrawSize(editor) {
+    if (!editor || typeof editor.getStyleForNextShape !== "function") {
+      return null;
+    }
+
+    const size = editor.getStyleForNextShape(TLDRAW_SIZE_STYLE);
+    return typeof size === "string" && size ? size : null;
+  }
+
+  isTldrawDrawSizeResetValue(size) {
+    return (
+      !size ||
+      size === "default" ||
+      size === TLDRAW_SIZE_STYLE.defaultValue
+    );
   }
 
   getTldrawDrawSizeApplyMarker(editor, root = null) {
@@ -2921,17 +3271,27 @@ module.exports = class WritingBridgePlugin extends Plugin {
     }
 
     const marker = this.getTldrawDrawSizeApplyMarker(editor, root);
-    const currentSize =
-      typeof editor.getStyleForNextShape === "function"
-        ? editor.getStyleForNextShape(TLDRAW_SIZE_STYLE)
-        : null;
+    const currentSize = this.getCurrentTldrawDrawSize(editor);
     const rootId = this.ensureStyleToggleRootId(root);
     const previous = this.appliedTldrawDrawSizeByRootId.get(rootId);
+    const sameScope = previous?.editor === editor && previous?.marker === marker;
+
+    if (currentSize === preferredSize) {
+      if (!sameScope || previous?.size !== currentSize) {
+        this.appliedTldrawDrawSizeByRootId.set(rootId, { editor, size: currentSize, marker });
+      }
+      return;
+    }
+
     if (
-      previous?.editor === editor &&
-      previous?.size === preferredSize &&
-      previous?.marker === marker
+      sameScope &&
+      currentSize &&
+      currentSize !== preferredSize &&
+      !this.isTldrawDrawSizeResetValue(currentSize)
     ) {
+      if (previous?.size !== currentSize) {
+        this.appliedTldrawDrawSizeByRootId.set(rootId, { editor, size: currentSize, marker });
+      }
       return;
     }
 
@@ -2939,7 +3299,8 @@ module.exports = class WritingBridgePlugin extends Plugin {
       if (currentSize !== preferredSize) {
         editor.setStyleForNextShapes(TLDRAW_SIZE_STYLE, preferredSize);
       }
-      this.appliedTldrawDrawSizeByRootId.set(rootId, { editor, size: preferredSize, marker });
+      const appliedSize = this.getCurrentTldrawDrawSize(editor) ?? preferredSize;
+      this.appliedTldrawDrawSizeByRootId.set(rootId, { editor, size: appliedSize, marker });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`failed to apply preferred tldraw draw size: ${message}`);
@@ -5492,6 +5853,192 @@ module.exports = class WritingBridgePlugin extends Plugin {
     throw new Error("tldraw editor cannot export selections");
   }
 
+  installTldrawEmbedPreviewFormatBridge() {
+    this.syncTldrawEmbedPreviewFormats();
+
+    const observer = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === "attributes" && mutation.attributeName === "src") {
+          this.scheduleTldrawEmbedPreviewFormatSync();
+          return;
+        }
+
+        if (mutation.type === "childList" && (mutation.addedNodes.length || mutation.removedNodes.length)) {
+          this.scheduleTldrawEmbedPreviewFormatSync();
+          return;
+        }
+      }
+    });
+
+    observer.observe(document.body, {
+      attributes: true,
+      attributeFilter: ["src"],
+      childList: true,
+      subtree: true,
+    });
+    this.register(() => observer.disconnect());
+
+    const syncAfterTldrawFileChange = (file) => {
+      if (file instanceof TFile && this.isTldrawSourceFile(file)) {
+        this.scheduleTldrawEmbedPreviewFormatSync(250);
+      }
+    };
+    this.registerEvent(this.app.vault.on("modify", syncAfterTldrawFileChange));
+    this.registerEvent(this.app.vault.on("rename", syncAfterTldrawFileChange));
+    this.registerEvent(this.app.vault.on("delete", syncAfterTldrawFileChange));
+  }
+
+  scheduleTldrawEmbedPreviewFormatSync(delayMs = 80) {
+    if (this.pendingTldrawEmbedPreviewSyncTimeout) {
+      window.clearTimeout(this.pendingTldrawEmbedPreviewSyncTimeout);
+    }
+
+    this.pendingTldrawEmbedPreviewSyncTimeout = window.setTimeout(() => {
+      this.pendingTldrawEmbedPreviewSyncTimeout = 0;
+      this.syncTldrawEmbedPreviewFormats();
+    }, delayMs);
+  }
+
+  syncTldrawEmbedPreviewFormats() {
+    const format = this.settings?.tldrawEmbedPreviewFormat ?? DEFAULT_SETTINGS.tldrawEmbedPreviewFormat;
+    if (format !== "png") {
+      this.restoreTldrawEmbedPreviewSourceUrls();
+      return;
+    }
+
+    for (const image of document.querySelectorAll(".ptl-markdown-embed .ptl-tldraw-image img[src]")) {
+      if (image instanceof HTMLImageElement && this.isTldrawEmbedPreviewImage(image)) {
+        void this.ensureTldrawEmbedPreviewPng(image);
+      }
+    }
+  }
+
+  restoreTldrawEmbedPreviewSourceUrls() {
+    for (const image of document.querySelectorAll(".ptl-markdown-embed .ptl-tldraw-image img[src]")) {
+      if (!(image instanceof HTMLImageElement)) {
+        continue;
+      }
+
+      const bridgeUrl = this.tldrawEmbedPreviewObjectUrlByImage.get(image);
+      const sourceUrl = this.tldrawEmbedPreviewSourceUrlByImage.get(image);
+      if (!bridgeUrl || !sourceUrl || (image.currentSrc || image.src) !== bridgeUrl) {
+        continue;
+      }
+
+      image.src = sourceUrl;
+      image.removeAttribute("data-tldraw-pen-bridge-preview-format");
+      this.tldrawEmbedPreviewObjectUrlByImage.delete(image);
+      this.tldrawEmbedPreviewSourceUrlByImage.delete(image);
+      URL.revokeObjectURL(bridgeUrl);
+      this.tldrawEmbedPreviewObjectUrls.delete(bridgeUrl);
+    }
+  }
+
+  isTldrawEmbedPreviewImage(image) {
+    if (!(image instanceof HTMLImageElement)) {
+      return false;
+    }
+
+    if (image.closest(".tldraw-view-root")) {
+      return false;
+    }
+
+    const previewRoot = image.closest(".ptl-tldraw-image");
+    return previewRoot instanceof HTMLElement && Boolean(previewRoot.closest(".ptl-markdown-embed"));
+  }
+
+  async ensureTldrawEmbedPreviewPng(image) {
+    const currentSrc = image.currentSrc || image.src;
+    if (typeof currentSrc !== "string" || currentSrc === "") {
+      return;
+    }
+
+    if (this.tldrawEmbedPreviewObjectUrlByImage.get(image) === currentSrc) {
+      return;
+    }
+
+    if (this.tldrawEmbedPreviewConversionByImage.get(image) === currentSrc) {
+      return;
+    }
+
+    this.tldrawEmbedPreviewConversionByImage.set(image, currentSrc);
+    try {
+      const svgMarkup = await this.readSvgMarkupFromImageUrl(currentSrc);
+      if (!svgMarkup) {
+        return;
+      }
+
+      const pngBlob = await this.renderSvgStringToPngBlob(svgMarkup, {
+        scale: 1,
+        pixelRatio: Math.max(1, Math.min(2, window.devicePixelRatio || 1)),
+      });
+      if (!(pngBlob instanceof Blob) || pngBlob.size === 0) {
+        return;
+      }
+
+      const previousBridgeUrl = this.tldrawEmbedPreviewObjectUrlByImage.get(image);
+      if (previousBridgeUrl) {
+        URL.revokeObjectURL(previousBridgeUrl);
+        this.tldrawEmbedPreviewObjectUrls.delete(previousBridgeUrl);
+      }
+
+      const pngUrl = URL.createObjectURL(pngBlob);
+      this.tldrawEmbedPreviewObjectUrls.add(pngUrl);
+      this.tldrawEmbedPreviewObjectUrlByImage.set(image, pngUrl);
+      this.tldrawEmbedPreviewSourceUrlByImage.set(image, currentSrc);
+      image.dataset.tldrawPenBridgePreviewFormat = "png";
+      image.src = pngUrl;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`tldraw embed PNG preview conversion failed: ${message}`);
+    } finally {
+      if (this.tldrawEmbedPreviewConversionByImage.get(image) === currentSrc) {
+        this.tldrawEmbedPreviewConversionByImage.delete(image);
+      }
+    }
+  }
+
+  async readSvgMarkupFromImageUrl(url) {
+    if (typeof url !== "string" || url === "") {
+      return null;
+    }
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      return null;
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    if (contentType.includes("image/png")) {
+      return null;
+    }
+
+    const text = await response.text();
+    const trimmed = text.trimStart();
+    if (!contentType.includes("svg") && !trimmed.startsWith("<svg") && !trimmed.startsWith("<?xml")) {
+      return null;
+    }
+
+    return text;
+  }
+
+  isTldrawSourceFile(file) {
+    if (!(file instanceof TFile)) {
+      return false;
+    }
+
+    if (file.extension === "tldr") {
+      return true;
+    }
+
+    if (file.extension !== "md") {
+      return false;
+    }
+
+    const cache = this.app.metadataCache.getFileCache(file);
+    return Boolean(cache?.frontmatter?.["tldraw-file"]);
+  }
+
   normalizeCopiedText(value) {
     if (typeof value !== "string") {
       return null;
@@ -5911,6 +6458,22 @@ class WritingBridgeSettingTab extends PluginSettingTab {
             this.plugin.appliedTldrawDrawSizeByRootId.clear();
             await this.plugin.saveSettings();
             this.plugin.syncRuledPageOverlays();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Tldraw embed preview format")
+      .setDesc("Convert tldraw page embeds to PNG previews by default. SVG leaves tldraw's normal vector preview alone.")
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption("png", "PNG")
+          .addOption("svg", "SVG")
+          .addOption("default", "Tldraw default")
+          .setValue(this.plugin.settings.tldrawEmbedPreviewFormat ?? "png")
+          .onChange(async (value) => {
+            this.plugin.settings.tldrawEmbedPreviewFormat = value;
+            await this.plugin.saveSettings();
+            this.plugin.syncTldrawEmbedPreviewFormats();
           });
       });
 
