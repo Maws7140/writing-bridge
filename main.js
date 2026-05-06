@@ -2740,7 +2740,6 @@ module.exports = class WritingBridgePlugin extends Plugin {
       element.removeAttribute("data-writing-bridge-theme");
     }
 
-    this.excalidrawThemeStateByRootId.clear();
   }
 
   applyExcalidrawThemeClasses(root, desiredTheme, shouldMatch) {
