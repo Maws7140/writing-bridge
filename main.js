@@ -96,15 +96,12 @@ const DEFAULT_SETTINGS = {
   ruledPageFeatureEnabled: true,
   sidebarPenAssistEnabled: true,
   tldrawDefaultPenSizeEnabled: true,
-  excalidrawThemeSyncEnabled: true,
   excalidrawDefaultZoomEnabled: true,
   tldrawEmbedPreviewBridgeEnabled: true,
   tldrawDefaultDrawSize: "s",
   tldrawEmbedPreviewFormat: "png",
   stylePanelCollapsed: true,
   ruledPageEnabled: true,
-  matchExcalidrawThemeToObsidian: false,
-  invertExcalidrawExportThemeVariants: true,
   excalidrawDefaultZoom: "",
 };
 
@@ -118,7 +115,6 @@ const FEATURE_TOGGLE_SETTING_KEYS = [
   "ruledPageFeatureEnabled",
   "sidebarPenAssistEnabled",
   "tldrawDefaultPenSizeEnabled",
-  "excalidrawThemeSyncEnabled",
   "excalidrawDefaultZoomEnabled",
   "tldrawEmbedPreviewBridgeEnabled",
 ];
@@ -202,7 +198,6 @@ module.exports = class WritingBridgePlugin extends Plugin {
     this.stylePanelToggleId = 0;
     this.excalidrawEmbedButtonId = 0;
     this.pendingExcalidrawFloatingUiSyncFrame = 0;
-    this.pendingExcalidrawThemeSyncTimeouts = new Set();
     this.pendingSidebarPenReplayTimeouts = new Set();
     this.tldrawEmbedPreviewObjectUrls = new Set();
     this.tldrawEmbedPreviewObjectUrlByImage = new WeakMap();
@@ -211,7 +206,6 @@ module.exports = class WritingBridgePlugin extends Plugin {
     this.pendingTldrawEmbedPreviewSyncTimeout = 0;
     this.excalidrawFloatingUiTrackingUntil = 0;
     this.ruledPageStateByRootId = new Map();
-    this.excalidrawThemeStateByRootId = new Map();
     this.sidebarPenTapState = null;
     this.selectionMenuState = {
       dismissedSelectionKey: "",
@@ -238,10 +232,6 @@ module.exports = class WritingBridgePlugin extends Plugin {
     window.addEventListener(ACTIVE_INK_EVENT, refreshSelectionMenu);
     this.register(() => window.removeEventListener(ACTIVE_INK_EVENT, refreshSelectionMenu));
     this.register(() => {
-      for (const timeoutId of this.pendingExcalidrawThemeSyncTimeouts) {
-        window.clearTimeout(timeoutId);
-      }
-      this.pendingExcalidrawThemeSyncTimeouts.clear();
       for (const timeoutId of this.pendingSidebarPenReplayTimeouts) {
         window.clearTimeout(timeoutId);
       }
@@ -1744,12 +1734,6 @@ module.exports = class WritingBridgePlugin extends Plugin {
         --writing-bridge-ruled-visibility: 1;
       }
 
-      .writing-bridge-excalidraw-theme-match.excalidraw-md-host {
-        background-color: var(
-          --writing-bridge-excalidraw-bg,
-          var(--background-primary)
-        );
-      }
 
       .writing-bridge-ruled-toggle {
         position: fixed;
@@ -1848,11 +1832,10 @@ module.exports = class WritingBridgePlugin extends Plugin {
 
     this.syncRuledPageOverlays();
     this.syncRuledPageToggles();
-    this.syncExcalidrawThemeMatching();
+    this.clearExcalidrawThemeMatching();
     this.syncExcalidrawDefaultZoom();
     this.registerInterval(window.setInterval(() => this.syncRuledPageOverlays(), STYLE_PANEL_SYNC_MS));
     this.registerInterval(window.setInterval(() => this.syncRuledPageToggles(), STYLE_PANEL_SYNC_MS));
-    this.registerInterval(window.setInterval(() => this.syncExcalidrawThemeMatching(), STYLE_PANEL_SYNC_MS));
     this.registerInterval(window.setInterval(() => this.syncExcalidrawDefaultZoom(), STYLE_PANEL_SYNC_MS));
     this.registerDomEvent(document, "scroll", () => this.scheduleExcalidrawFloatingUiSync(), {
       capture: true,
@@ -1899,8 +1882,6 @@ module.exports = class WritingBridgePlugin extends Plugin {
     this.registerEvent(this.app.workspace.on("layout-change", () => {
       this.syncRuledPageOverlays();
       this.syncRuledPageToggles();
-      this.syncExcalidrawThemeMatching();
-      this.queueExcalidrawThemeSyncBurst();
       this.syncExcalidrawDefaultZoom();
     }));
     this.registerEvent(this.app.workspace.on("active-leaf-change", (leaf) => {
@@ -2495,19 +2476,10 @@ module.exports = class WritingBridgePlugin extends Plugin {
     }
   }
 
+  // Theme sync removed — Excalidraw handles its own theme now.
+  // This stub only cleans up stale classes from older sessions.
   syncExcalidrawThemeMatching() {
-    if (!this.isFeatureEnabled("excalidrawThemeSyncEnabled")) {
-      this.clearExcalidrawThemeMatching();
-      this.syncExcalidrawEmbedEditButtons();
-      return;
-    }
-
-    const desiredTheme = this.getObsidianThemeMode();
-    // Excalidraw already has its own startup hook for the live editor theme.
-    // The bridge stays on embed cleanup and bridge UI so the two paths do not fight.
-    this.syncExcalidrawEmbedThemeMatching();
-    this.syncExcalidrawExportImageEmbeds(desiredTheme);
-    this.syncExcalidrawEmbedEditButtons();
+    this.clearExcalidrawThemeMatching();
   }
 
   syncExcalidrawFloatingUi() {
@@ -7584,16 +7556,6 @@ class WritingBridgeSettingTab extends PluginSettingTab {
         })
       );
 
-    new Setting(containerEl)
-      .setName("Enable Excalidraw theme sync")
-      .setDesc("Apply the bridge's Excalidraw theme matching, themed export swapping, and embed edit affordances.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.isFeatureEnabled("excalidrawThemeSyncEnabled")).onChange(async (value) => {
-          this.plugin.settings.excalidrawThemeSyncEnabled = value;
-          await this.plugin.saveSettings();
-          this.plugin.syncExcalidrawThemeMatching();
-        })
-      );
 
     new Setting(containerEl)
       .setName("Enable default Excalidraw zoom")
@@ -7666,27 +7628,6 @@ class WritingBridgeSettingTab extends PluginSettingTab {
         })
       );
 
-    new Setting(containerEl)
-      .setName("Match Excalidraw to Obsidian theme")
-      .setDesc("Force Excalidraw views and embeds to follow Obsidian's light or dark page theme when the plugin's own auto match is flaky.")
-      .addToggle((toggle) =>
-        toggle.setValue(Boolean(this.plugin.settings.matchExcalidrawThemeToObsidian)).onChange(async (value) => {
-          this.plugin.settings.matchExcalidrawThemeToObsidian = value;
-          await this.plugin.saveSettings();
-          this.plugin.syncExcalidrawThemeMatching();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Invert Excalidraw export theme variants")
-      .setDesc("Use the opposite .light/.dark export file when Excalidraw's themed image embeds are named backwards.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.invertExcalidrawExportThemeVariants !== false).onChange(async (value) => {
-          this.plugin.settings.invertExcalidrawExportThemeVariants = value;
-          await this.plugin.saveSettings();
-          this.plugin.syncExcalidrawThemeMatching();
-        })
-      );
 
     new Setting(containerEl)
       .setName("Default Excalidraw zoom")
