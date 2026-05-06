@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const { execFile } = require("child_process");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { Notice, Plugin, PluginSettingTab, Setting, TFile, normalizePath } = require("obsidian");
 
@@ -43,15 +44,34 @@ const OCR_EXPORT_PADDING = 24;
 const OCR_EXPORT_SCALE = 3;
 const OCR_EXPORT_PIXEL_RATIO = 2;
 const INK_HELPER_EXE = "InkStrokeRecognizer.exe";
+const REGION_SCREENSHOT_HELPER = "RegionScreenshot.ps1";
 const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 const GEMINI_API_URL_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const VISION_PROVIDER_OPENROUTER = "openrouter";
 const VISION_PROVIDER_GEMINI = "gemini";
+const VISION_PROVIDER_CUSTOM = "custom";
+const VISION_PROVIDERS = [
+  VISION_PROVIDER_OPENROUTER,
+  VISION_PROVIDER_GEMINI,
+  VISION_PROVIDER_CUSTOM,
+];
 const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash";
 const OPENROUTER_DEFAULT_MODELS = [
   "moonshotai/kimi-vl-a3b-thinking:free",
   "qwen/qwen2.5-vl-32b-instruct:free",
 ];
+const DEFAULT_VISION_TRANSCRIPTION_PROMPT = [
+  "Transcribe the handwritten note or math in this image exactly.",
+  "Preserve line breaks where they are visually obvious.",
+  "Prefer the literal reading over cleanup or interpretation.",
+  "If the selection is math, format it as readable linear math for pasting into a normal text box such as Excalidraw.",
+  "Do not use LaTeX commands, LaTeX delimiters, or markdown math fencing.",
+  "Prefer common math symbols such as ≤, ≥, ≠, ≈, √, ×, ÷, π, θ, ∑, ∫, and → when they are clearly intended.",
+  "Use simple unicode superscripts like ² and ³ when obvious and compact; otherwise use ^ and _ only when needed.",
+  "Keep fractions, exponents, limits, and equations easy to read in plain pasted text.",
+  "Do not explain, solve, normalize, or summarize.",
+  "Output only the transcription.",
+].join(" ");
 const TLDRAW_EMBED_PREVIEW_FORMAT_OPTIONS = ["png", "svg", "default"];
 const FLOAT16_POW2 = Array.from({ length: 31 }, (_, index) => Math.pow(2, index - 15));
 const FLOAT16_POW2_SUBNORMAL = Math.pow(2, -14) / 1024;
@@ -63,13 +83,45 @@ const DEFAULT_SETTINGS = {
   openRouterModels: OPENROUTER_DEFAULT_MODELS.join("\n"),
   geminiApiKey: "",
   geminiModel: GEMINI_DEFAULT_MODEL,
+  customOpenAiBaseUrl: "",
+  customOpenAiApiKey: "",
+  customOpenAiModel: "",
+  visionTranscriptionPrompt: DEFAULT_VISION_TRANSCRIPTION_PROMPT,
+  toolCommandsEnabled: true,
+  copySelectedTextEnabled: true,
+  selectionScreenshotEnabled: true,
+  regionScreenshotEnabled: true,
+  selectionMenuEnabled: true,
+  stylePanelToggleEnabled: true,
+  ruledPageFeatureEnabled: true,
+  sidebarPenAssistEnabled: true,
+  tldrawDefaultPenSizeEnabled: true,
+  excalidrawThemeSyncEnabled: true,
+  excalidrawDefaultZoomEnabled: true,
+  tldrawEmbedPreviewBridgeEnabled: true,
   tldrawDefaultDrawSize: "s",
   tldrawEmbedPreviewFormat: "png",
   stylePanelCollapsed: true,
   ruledPageEnabled: true,
-  matchExcalidrawThemeToObsidian: true,
+  matchExcalidrawThemeToObsidian: false,
   invertExcalidrawExportThemeVariants: true,
+  excalidrawDefaultZoom: "",
 };
+
+const FEATURE_TOGGLE_SETTING_KEYS = [
+  "toolCommandsEnabled",
+  "copySelectedTextEnabled",
+  "selectionScreenshotEnabled",
+  "regionScreenshotEnabled",
+  "selectionMenuEnabled",
+  "stylePanelToggleEnabled",
+  "ruledPageFeatureEnabled",
+  "sidebarPenAssistEnabled",
+  "tldrawDefaultPenSizeEnabled",
+  "excalidrawThemeSyncEnabled",
+  "excalidrawDefaultZoomEnabled",
+  "tldrawEmbedPreviewBridgeEnabled",
+];
 
 const TOOL_COMMANDS = [
   {
@@ -110,6 +162,26 @@ const SCREENSHOT_COMMAND = {
   hotkeyKey: "P",
 };
 
+const REGION_SCREENSHOT_COMMAND = {
+  id: "surface-pen-region-screenshot",
+  name: "Writing Bridge: Region Screenshot to Clipboard",
+};
+
+const REGION_SCREENSHOT_PASTE_COMMAND = {
+  id: "surface-pen-region-screenshot-paste",
+  name: "Writing Bridge: Region Screenshot and Paste",
+};
+
+const REGION_SCROLLING_SCREENSHOT_COMMAND = {
+  id: "surface-pen-region-scrolling-screenshot",
+  name: "Writing Bridge: Scrolling Region Screenshot to Clipboard",
+};
+
+const REGION_SCROLLING_SCREENSHOT_PASTE_COMMAND = {
+  id: "surface-pen-region-scrolling-screenshot-paste",
+  name: "Writing Bridge: Scrolling Region Screenshot and Paste",
+};
+
 const TOGGLE_RULED_PAGE_COMMAND = {
   id: "surface-pen-toggle-ruled-page",
   name: "Writing Bridge: Toggle Ruled Page",
@@ -120,11 +192,13 @@ module.exports = class WritingBridgePlugin extends Plugin {
     await this.loadSettings();
     this.copyInFlight = false;
     this.screenshotInFlight = false;
+    this.regionScreenshotInFlight = false;
     this.lastCopyStartedAt = 0;
     this.selectionMenuEl = null;
     this.lastActiveCanvasTarget = null;
     this.lastActiveTldrawTarget = null;
     this.appliedTldrawDrawSizeByRootId = new Map();
+    this.appliedExcalidrawZoomLeaves = new WeakSet();
     this.stylePanelToggleId = 0;
     this.excalidrawEmbedButtonId = 0;
     this.pendingExcalidrawFloatingUiSyncFrame = 0;
@@ -152,6 +226,7 @@ module.exports = class WritingBridgePlugin extends Plugin {
     this.addSettingTab(new WritingBridgeSettingTab(this.app, this));
     this.registerCopyCommand();
     this.registerScreenshotCommand();
+    this.registerRegionScreenshotCommands();
     this.installSelectionMenu();
     this.installStylePanelToggle();
     this.registerRuledPageCommand();
@@ -194,10 +269,7 @@ module.exports = class WritingBridgePlugin extends Plugin {
       this.settings.openRouterModels = this.settings.openRouterModels.join("\n");
     }
 
-    if (
-      this.settings.visionLlmProvider !== VISION_PROVIDER_OPENROUTER &&
-      this.settings.visionLlmProvider !== VISION_PROVIDER_GEMINI
-    ) {
+    if (!VISION_PROVIDERS.includes(this.settings.visionLlmProvider)) {
       this.settings.visionLlmProvider = DEFAULT_SETTINGS.visionLlmProvider;
     }
 
@@ -208,10 +280,35 @@ module.exports = class WritingBridgePlugin extends Plugin {
     if (!TLDRAW_EMBED_PREVIEW_FORMAT_OPTIONS.includes(this.settings.tldrawEmbedPreviewFormat)) {
       this.settings.tldrawEmbedPreviewFormat = DEFAULT_SETTINGS.tldrawEmbedPreviewFormat;
     }
+
+    if (typeof this.settings.visionTranscriptionPrompt !== "string") {
+      this.settings.visionTranscriptionPrompt = DEFAULT_SETTINGS.visionTranscriptionPrompt;
+    }
+
+    if (typeof this.settings.excalidrawDefaultZoom !== "string") {
+      this.settings.excalidrawDefaultZoom =
+        this.settings.excalidrawDefaultZoom == null
+          ? ""
+          : `${this.settings.excalidrawDefaultZoom}`;
+    }
+
+    for (const key of FEATURE_TOGGLE_SETTING_KEYS) {
+      if (typeof this.settings[key] !== "boolean") {
+        this.settings[key] = DEFAULT_SETTINGS[key];
+      }
+    }
   }
 
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+
+  isFeatureEnabled(settingKey) {
+    return this.settings?.[settingKey] !== false;
+  }
+
+  showFeatureDisabledNotice(featureLabel) {
+    new Notice(`${featureLabel} is disabled in Writing Bridge settings`);
   }
 
   registerToolCommand(command) {
@@ -225,6 +322,13 @@ module.exports = class WritingBridgePlugin extends Plugin {
         },
       ],
       checkCallback: (checking) => {
+        if (!this.isFeatureEnabled("toolCommandsEnabled")) {
+          if (!checking) {
+            this.showFeatureDisabledNotice("Canvas tool commands");
+          }
+          return false;
+        }
+
         const target = this.getCanvasTarget();
         if (!target) {
           if (!checking) {
@@ -254,6 +358,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
         },
       ],
       callback: () => {
+        if (!this.isFeatureEnabled("copySelectedTextEnabled")) {
+          this.showFeatureDisabledNotice("Copy selected as text");
+          return;
+        }
+
         const target = this.getCanvasTarget();
         if (!target && !this.getActiveDomTextSelection(null)) {
           this.log(`command ${COPY_COMMAND.id}: no active canvas target`);
@@ -274,6 +383,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
         },
       ],
       callback: () => {
+        if (!this.isFeatureEnabled("selectionScreenshotEnabled")) {
+          this.showFeatureDisabledNotice("Copy selected screenshot");
+          return;
+        }
+
         const target = this.getCanvasTarget();
         if (!target) {
           this.log(`command ${SCREENSHOT_COMMAND.id}: no active canvas target`);
@@ -283,11 +397,429 @@ module.exports = class WritingBridgePlugin extends Plugin {
     });
   }
 
+  registerRegionScreenshotCommands() {
+    this.addCommand({
+      id: REGION_SCREENSHOT_COMMAND.id,
+      name: REGION_SCREENSHOT_COMMAND.name,
+      callback: () => {
+        if (!this.isFeatureEnabled("regionScreenshotEnabled")) {
+          this.showFeatureDisabledNotice("Region screenshots");
+          return;
+        }
+
+        void this.captureScreenRegion({ paste: false });
+      },
+    });
+
+    this.addCommand({
+      id: REGION_SCREENSHOT_PASTE_COMMAND.id,
+      name: REGION_SCREENSHOT_PASTE_COMMAND.name,
+      callback: () => {
+        if (!this.isFeatureEnabled("regionScreenshotEnabled")) {
+          this.showFeatureDisabledNotice("Region screenshots");
+          return;
+        }
+
+        void this.captureScreenRegion({ paste: true });
+      },
+    });
+
+    this.addCommand({
+      id: REGION_SCROLLING_SCREENSHOT_COMMAND.id,
+      name: REGION_SCROLLING_SCREENSHOT_COMMAND.name,
+      callback: () => {
+        if (!this.isFeatureEnabled("regionScreenshotEnabled")) {
+          this.showFeatureDisabledNotice("Region screenshots");
+          return;
+        }
+
+        void this.captureScrollingScreenRegion({ paste: false });
+      },
+    });
+
+    this.addCommand({
+      id: REGION_SCROLLING_SCREENSHOT_PASTE_COMMAND.id,
+      name: REGION_SCROLLING_SCREENSHOT_PASTE_COMMAND.name,
+      callback: () => {
+        if (!this.isFeatureEnabled("regionScreenshotEnabled")) {
+          this.showFeatureDisabledNotice("Region screenshots");
+          return;
+        }
+
+        void this.captureScrollingScreenRegion({ paste: true });
+      },
+    });
+  }
+
+  async captureScreenRegion({ paste = false } = {}) {
+    if (!this.isFeatureEnabled("regionScreenshotEnabled")) {
+      this.showFeatureDisabledNotice("Region screenshots");
+      return;
+    }
+
+    if (this.regionScreenshotInFlight) {
+      this.log("region screenshot skipped: already running");
+      return;
+    }
+
+    this.regionScreenshotInFlight = true;
+    const targetBeforeCapture = this.getCanvasTarget();
+    const activeElementBeforeCapture = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+    try {
+      await this.runRegionScreenshotHelper();
+      new Notice(paste ? "Region screenshot copied; pasting..." : "Region screenshot copied");
+      if (paste) {
+        this.pasteClipboardImageToActiveTarget(targetBeforeCapture, activeElementBeforeCapture);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message !== "region screenshot cancelled") {
+        this.log(`region screenshot failed: ${message}`);
+        new Notice(this.getFailureNoticeMessage("Region screenshot", error));
+      }
+    } finally {
+      this.regionScreenshotInFlight = false;
+    }
+  }
+
+  async runRegionScreenshotHelper() {
+    const helperPath = this.getRegionScreenshotHelperPath();
+    if (!fs.existsSync(helperPath)) {
+      throw new Error("Region screenshot helper is missing");
+    }
+
+    await new Promise((resolve, reject) => {
+      execFile(
+        "powershell.exe",
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", helperPath],
+        { windowsHide: false },
+        (error, stdout, stderr) => {
+          if (!error) {
+            resolve();
+            return;
+          }
+
+          if (error.code === 2) {
+            reject(new Error("region screenshot cancelled"));
+            return;
+          }
+
+          const detail = String(stderr || stdout || error.message || "").trim();
+          reject(new Error(detail || "Region screenshot helper failed"));
+        }
+      );
+    });
+  }
+
+  async captureScrollingScreenRegion({ paste = false } = {}) {
+    if (!this.isFeatureEnabled("regionScreenshotEnabled")) {
+      this.showFeatureDisabledNotice("Region screenshots");
+      return;
+    }
+
+    if (this.regionScreenshotInFlight) {
+      this.log("scrolling region screenshot skipped: already running");
+      return;
+    }
+
+    this.regionScreenshotInFlight = true;
+    const targetBeforeCapture = this.getCanvasTarget();
+    const activeElementBeforeCapture = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const scrollElement = this.getActiveScreenshotScrollElement();
+
+    try {
+      const screenRect = await this.selectScreenRegion();
+      if (!scrollElement) {
+        await this.runRegionScreenshotHelperForRect(screenRect);
+        new Notice(paste ? "Region screenshot copied; pasting..." : "Region screenshot copied");
+        if (paste) {
+          this.pasteClipboardImageToActiveTarget(targetBeforeCapture, activeElementBeforeCapture);
+        }
+        return;
+      }
+
+      const blob = await this.captureScrollingRegionToBlob(screenRect, scrollElement);
+      await this.writeClipboardImage(blob);
+      new Notice(paste ? "Scrolling screenshot copied; pasting..." : "Scrolling screenshot copied");
+      if (paste) {
+        this.pasteClipboardImageToActiveTarget(targetBeforeCapture, activeElementBeforeCapture);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message !== "region screenshot cancelled") {
+        this.log(`scrolling region screenshot failed: ${message}`);
+        new Notice(this.getFailureNoticeMessage("Scrolling screenshot", error));
+      }
+    } finally {
+      this.regionScreenshotInFlight = false;
+    }
+  }
+
+  async selectScreenRegion() {
+    const helperPath = this.getRegionScreenshotHelperPath();
+    if (!fs.existsSync(helperPath)) {
+      throw new Error("Region screenshot helper is missing");
+    }
+
+    const stdout = await new Promise((resolve, reject) => {
+      execFile(
+        "powershell.exe",
+        ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", helperPath, "-SelectOnly"],
+        { windowsHide: false },
+        (error, stdout, stderr) => {
+          if (!error) {
+            resolve(String(stdout || "").trim());
+            return;
+          }
+
+          if (error.code === 2) {
+            reject(new Error("region screenshot cancelled"));
+            return;
+          }
+
+          const detail = String(stderr || stdout || error.message || "").trim();
+          reject(new Error(detail || "Region screenshot selection failed"));
+        }
+      );
+    });
+
+    let rect = null;
+    try {
+      rect = JSON.parse(stdout);
+    } catch (error) {
+      throw this.wrapErrorWithContext("Region screenshot selection returned invalid JSON", error);
+    }
+
+    if (!this.isValidScreenRect(rect)) {
+      throw new Error("Region screenshot selection returned an invalid rectangle");
+    }
+
+    return {
+      x: Math.round(rect.x),
+      y: Math.round(rect.y),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+    };
+  }
+
+  isValidScreenRect(rect) {
+    return (
+      rect &&
+      Number.isFinite(Number(rect.x)) &&
+      Number.isFinite(Number(rect.y)) &&
+      Number.isFinite(Number(rect.width)) &&
+      Number.isFinite(Number(rect.height)) &&
+      Number(rect.width) >= 4 &&
+      Number(rect.height) >= 4
+    );
+  }
+
+  async runRegionScreenshotHelperForRect(screenRect, outputFile = "") {
+    const helperPath = this.getRegionScreenshotHelperPath();
+    if (!fs.existsSync(helperPath)) {
+      throw new Error("Region screenshot helper is missing");
+    }
+
+    const args = [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      helperPath,
+      "-CaptureRectJson",
+      JSON.stringify(screenRect),
+    ];
+    if (outputFile) {
+      args.push("-OutputFile", outputFile);
+    }
+
+    await new Promise((resolve, reject) => {
+      execFile("powershell.exe", args, { windowsHide: true }, (error, stdout, stderr) => {
+        if (!error) {
+          resolve();
+          return;
+        }
+
+        const detail = String(stderr || stdout || error.message || "").trim();
+        reject(new Error(detail || "Region screenshot capture failed"));
+      });
+    });
+  }
+
+  getActiveScreenshotScrollElement() {
+    const activeLeaf = document.querySelector(".workspace-leaf.mod-active");
+    if (!(activeLeaf instanceof HTMLElement)) {
+      return null;
+    }
+
+    const selectors = [
+      ".cm-scroller",
+      ".markdown-preview-view",
+      ".markdown-source-view .cm-scroller",
+      ".view-content",
+    ];
+
+    for (const selector of selectors) {
+      const candidate = activeLeaf.querySelector(selector);
+      if (candidate instanceof HTMLElement && this.canElementScrollVertically(candidate)) {
+        return candidate;
+      }
+    }
+
+    return this.canElementScrollVertically(activeLeaf) ? activeLeaf : null;
+  }
+
+  canElementScrollVertically(element) {
+    return element instanceof HTMLElement && element.scrollHeight - element.clientHeight > 8;
+  }
+
+  async captureScrollingRegionToBlob(screenRect, scrollElement) {
+    const startScrollTop = scrollElement.scrollTop;
+    const maxScrollTop = Math.max(0, scrollElement.scrollHeight - scrollElement.clientHeight);
+    const scrollStep = Math.max(80, Math.floor(screenRect.height * 0.85));
+    const maxOutputHeight = 16000;
+    const captures = [];
+
+    try {
+      for (let index = 0; index < 80; index += 1) {
+        const currentScrollTop = scrollElement.scrollTop;
+        const yOffset = Math.max(0, Math.round(currentScrollTop - startScrollTop));
+        if (yOffset >= maxOutputHeight) {
+          break;
+        }
+
+        const imageBlob = await this.captureScreenRectToBlob(screenRect);
+        captures.push({ blob: imageBlob, y: yOffset });
+
+        if (currentScrollTop >= maxScrollTop - 1 || yOffset + screenRect.height >= maxOutputHeight) {
+          break;
+        }
+
+        const nextScrollTop = Math.min(maxScrollTop, currentScrollTop + scrollStep);
+        if (Math.abs(nextScrollTop - currentScrollTop) < 1) {
+          break;
+        }
+
+        scrollElement.scrollTop = nextScrollTop;
+        await this.waitForScrollSettle();
+      }
+    } finally {
+      scrollElement.scrollTop = startScrollTop;
+    }
+
+    if (captures.length === 0) {
+      throw new Error("No screenshot strips were captured");
+    }
+
+    return this.stitchScreenshotStrips(captures, screenRect.width, screenRect.height, maxOutputHeight);
+  }
+
+  async captureScreenRectToBlob(screenRect) {
+    const outputFile = path.join(os.tmpdir(), `writing-bridge-region-${Date.now()}-${crypto.randomUUID()}.png`);
+    try {
+      await this.runRegionScreenshotHelperForRect(screenRect, outputFile);
+      return new Blob([await fs.promises.readFile(outputFile)], { type: "image/png" });
+    } finally {
+      fs.promises.unlink(outputFile).catch(() => {});
+    }
+  }
+
+  waitForScrollSettle() {
+    return new Promise((resolve) => window.setTimeout(resolve, 180));
+  }
+
+  async stitchScreenshotStrips(captures, width, stripHeight, maxOutputHeight) {
+    const outputHeight = Math.min(
+      maxOutputHeight,
+      Math.max(...captures.map((capture) => capture.y + stripHeight))
+    );
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = outputHeight;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      throw new Error("Could not create screenshot stitch canvas");
+    }
+
+    for (const capture of captures) {
+      const bitmap = await createImageBitmap(capture.blob);
+      try {
+        context.drawImage(bitmap, 0, capture.y);
+      } finally {
+        bitmap.close?.();
+      }
+    }
+
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) {
+      throw new Error("Could not encode scrolling screenshot");
+    }
+
+    return blob;
+  }
+
+  getRegionScreenshotHelperPath() {
+    return this.getVaultAbsolutePath(
+      normalizePath(`${this.app.vault.configDir}/plugins/${this.manifest.id}/runtime/${REGION_SCREENSHOT_HELPER}`)
+    );
+  }
+
+  pasteClipboardImageToActiveTarget(targetBeforeCapture = null, activeElementBeforeCapture = null) {
+    const target = targetBeforeCapture ?? this.getCanvasTarget();
+    const pasteTarget = this.getPasteTargetElement(target) ?? activeElementBeforeCapture ?? document.activeElement;
+    if (!(pasteTarget instanceof HTMLElement)) {
+      const error = new Error("No active paste target was available");
+      this.log(`region screenshot paste failed: ${error.message}`);
+      new Notice(this.getFailureNoticeMessage("Paste screenshot", error));
+      return false;
+    }
+
+    pasteTarget.focus?.({ preventScroll: true });
+    window.setTimeout(() => {
+      try {
+        this.sendShortcutKey(pasteTarget, "v", "KeyV", {
+          ctrlKey: true,
+        });
+        this.dispatchClipboardCommand(pasteTarget, "paste");
+      } catch (error) {
+        const message = this.getErrorMessage(error);
+        this.log(`region screenshot paste failed: ${message}`);
+        new Notice(this.getFailureNoticeMessage("Paste screenshot", error));
+      }
+    }, 100);
+    return true;
+  }
+
+  getPasteTargetElement(target) {
+    if (target?.kind === "tldraw" && target.container instanceof HTMLElement) {
+      return target.container;
+    }
+
+    if (target?.kind === "excalidraw") {
+      const root = this.getExcalidrawRootForView(target.view) ?? target.container;
+      return root instanceof HTMLElement ? root : null;
+    }
+
+    const activeEditorEl = document.querySelector(".workspace-leaf.mod-active .cm-editor.cm-focused");
+    if (activeEditorEl instanceof HTMLElement) {
+      return activeEditorEl;
+    }
+
+    const activeLeafContent = document.querySelector(".workspace-leaf.mod-active .workspace-leaf-content");
+    return activeLeafContent instanceof HTMLElement ? activeLeafContent : null;
+  }
+
   registerRuledPageCommand() {
     this.addCommand({
       id: TOGGLE_RULED_PAGE_COMMAND.id,
       name: TOGGLE_RULED_PAGE_COMMAND.name,
       callback: () => {
+        if (!this.isFeatureEnabled("ruledPageFeatureEnabled")) {
+          this.showFeatureDisabledNotice("Ruled page overlay");
+          return;
+        }
+
         void this.toggleRuledPageEnabled();
       },
     });
@@ -887,6 +1419,77 @@ module.exports = class WritingBridgePlugin extends Plugin {
     return api && typeof api.getAppState === "function" ? api : null;
   }
 
+  getConfiguredExcalidrawDefaultZoom() {
+    if (!this.isFeatureEnabled("excalidrawDefaultZoomEnabled")) {
+      return null;
+    }
+
+    const raw =
+      typeof this.settings?.excalidrawDefaultZoom === "string"
+        ? this.settings.excalidrawDefaultZoom.trim()
+        : "";
+    if (raw === "") {
+      return null;
+    }
+
+    const normalized = raw.endsWith("%") ? raw.slice(0, -1) : raw;
+    const parsed = Number(normalized);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return null;
+    }
+
+    const ratio = raw.endsWith("%") || parsed > 10 ? parsed / 100 : parsed;
+    if (!Number.isFinite(ratio) || ratio <= 0) {
+      return null;
+    }
+
+    return Math.min(30, Math.max(0.05, ratio));
+  }
+
+  applyPreferredExcalidrawZoom(view) {
+    const zoom = this.getConfiguredExcalidrawDefaultZoom();
+    if (zoom === null) {
+      return;
+    }
+
+    const leaf = view?.leaf;
+    if (!leaf || this.appliedExcalidrawZoomLeaves.has(leaf)) {
+      return;
+    }
+
+    const api = this.getExcalidrawApi(view);
+    if (!api || typeof api.updateScene !== "function") {
+      return;
+    }
+
+    try {
+      api.updateScene({
+        appState: {
+          zoom: { value: zoom },
+        },
+      });
+      this.appliedExcalidrawZoomLeaves.add(leaf);
+      this.log(`applied default Excalidraw zoom ${zoom} to leaf`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`failed to apply default Excalidraw zoom: ${message}`);
+    }
+  }
+
+  syncExcalidrawDefaultZoom() {
+    if (this.getConfiguredExcalidrawDefaultZoom() === null) {
+      return;
+    }
+
+    const leaves = this.app.workspace.getLeavesOfType(EXCALIDRAW_VIEW_TYPE) ?? [];
+    for (const leaf of leaves) {
+      const view = leaf?.view;
+      if (this.isExcalidrawView(view)) {
+        this.applyPreferredExcalidrawZoom(view);
+      }
+    }
+  }
+
   isExcalidrawView(view) {
     return Boolean(view && typeof view.getViewType === "function" && view.getViewType() === EXCALIDRAW_VIEW_TYPE);
   }
@@ -1141,13 +1744,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
         --writing-bridge-ruled-visibility: 1;
       }
 
-      .writing-bridge-excalidraw-theme-match .excalidraw,
-      .writing-bridge-excalidraw-theme-match .excalidraw .App-menu_top,
       .writing-bridge-excalidraw-theme-match.excalidraw-md-host {
         background-color: var(
           --writing-bridge-excalidraw-bg,
           var(--background-primary)
-        ) !important;
+        );
       }
 
       .writing-bridge-ruled-toggle {
@@ -1248,9 +1849,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
     this.syncRuledPageOverlays();
     this.syncRuledPageToggles();
     this.syncExcalidrawThemeMatching();
+    this.syncExcalidrawDefaultZoom();
     this.registerInterval(window.setInterval(() => this.syncRuledPageOverlays(), STYLE_PANEL_SYNC_MS));
     this.registerInterval(window.setInterval(() => this.syncRuledPageToggles(), STYLE_PANEL_SYNC_MS));
     this.registerInterval(window.setInterval(() => this.syncExcalidrawThemeMatching(), STYLE_PANEL_SYNC_MS));
+    this.registerInterval(window.setInterval(() => this.syncExcalidrawDefaultZoom(), STYLE_PANEL_SYNC_MS));
     this.registerDomEvent(document, "scroll", () => this.scheduleExcalidrawFloatingUiSync(), {
       capture: true,
       passive: true,
@@ -1263,6 +1866,33 @@ module.exports = class WritingBridgePlugin extends Plugin {
       capture: true,
       passive: true,
     });
+    this.registerDomEvent(
+      document,
+      "pointerdown",
+      (event) => this.handleExcalidrawViewportInteraction(event, 360),
+      {
+        capture: true,
+        passive: true,
+      }
+    );
+    this.registerDomEvent(
+      document,
+      "pointermove",
+      (event) => this.handleExcalidrawViewportInteraction(event, 360),
+      {
+        capture: true,
+        passive: true,
+      }
+    );
+    this.registerDomEvent(
+      document,
+      "pointerup",
+      (event) => this.handleExcalidrawViewportInteraction(event, 180),
+      {
+        capture: true,
+        passive: true,
+      }
+    );
     this.registerDomEvent(window, "resize", () => this.scheduleExcalidrawFloatingUiSync(), {
       passive: true,
     });
@@ -1271,6 +1901,7 @@ module.exports = class WritingBridgePlugin extends Plugin {
       this.syncRuledPageToggles();
       this.syncExcalidrawThemeMatching();
       this.queueExcalidrawThemeSyncBurst();
+      this.syncExcalidrawDefaultZoom();
     }));
     this.registerEvent(this.app.workspace.on("active-leaf-change", (leaf) => {
       if (leaf?.view?.getViewType?.() !== EXCALIDRAW_VIEW_TYPE) {
@@ -1278,6 +1909,7 @@ module.exports = class WritingBridgePlugin extends Plugin {
       }
 
       this.scheduleExcalidrawFloatingUiSync();
+      this.applyPreferredExcalidrawZoom(leaf.view);
     }));
     this.register(() => {
       if (this.pendingExcalidrawFloatingUiSyncFrame) {
@@ -1326,6 +1958,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   handleSidebarPenPointerDown(event) {
+    if (!this.isFeatureEnabled("sidebarPenAssistEnabled")) {
+      this.sidebarPenTapState = null;
+      return;
+    }
+
     if (!this.isSidebarPenPointerEvent(event)) {
       return;
     }
@@ -1347,6 +1984,10 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   handleSidebarPenPointerUp(event) {
+    if (!this.isFeatureEnabled("sidebarPenAssistEnabled")) {
+      return;
+    }
+
     if (!this.isSidebarPenPointerEvent(event)) {
       return;
     }
@@ -1401,12 +2042,21 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   handleSidebarPenPointerCancel(event) {
+    if (!this.isFeatureEnabled("sidebarPenAssistEnabled")) {
+      this.sidebarPenTapState = null;
+      return;
+    }
+
     if (this.sidebarPenTapState?.pointerId === event.pointerId) {
       this.sidebarPenTapState = null;
     }
   }
 
   handleSidebarPenNativeClick(event) {
+    if (!this.isFeatureEnabled("sidebarPenAssistEnabled")) {
+      return;
+    }
+
     const state = this.sidebarPenTapState;
     if (!state?.target || !(event.target instanceof Node)) {
       return;
@@ -1571,9 +2221,17 @@ module.exports = class WritingBridgePlugin extends Plugin {
       return;
     }
 
+    const target = this.getTldrawTarget();
+    const targetForRoot = this.getTldrawTargetForRoot(root, target);
+    this.applyPreferredTldrawDrawSize(root, targetForRoot);
+
     const canvas = root.querySelector(".tl-canvas");
     const existing = root.querySelector(".writing-bridge-ruled-page");
-    if (!(canvas instanceof HTMLElement) || !this.settings.ruledPageEnabled) {
+    if (
+      !(canvas instanceof HTMLElement) ||
+      !this.isFeatureEnabled("ruledPageFeatureEnabled") ||
+      !this.settings.ruledPageEnabled
+    ) {
       if (existing instanceof HTMLElement) {
         existing.remove();
       }
@@ -1597,9 +2255,6 @@ module.exports = class WritingBridgePlugin extends Plugin {
       host.prepend(overlay);
     }
 
-    const target = this.getTldrawTarget();
-    const targetForRoot = this.getTldrawTargetForRoot(root, target);
-    this.applyPreferredTldrawDrawSize(root, targetForRoot);
     const rootId = this.ensureStyleToggleRootId(root);
     const nextState = this.getRuledPageOverlayState(targetForRoot);
     const overlayState = nextState ?? this.ruledPageStateByRootId.get(rootId) ?? {
@@ -1654,11 +2309,38 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   async toggleRuledPageEnabled() {
+    if (!this.isFeatureEnabled("ruledPageFeatureEnabled")) {
+      this.showFeatureDisabledNotice("Ruled page overlay");
+      return;
+    }
+
     this.settings.ruledPageEnabled = !this.settings.ruledPageEnabled;
     await this.saveSettings();
     this.syncRuledPageOverlays();
     this.syncRuledPageToggles();
     new Notice(this.settings.ruledPageEnabled ? "Ruled page enabled" : "Ruled page disabled");
+  }
+
+  destroyRuledPageDecorations() {
+    for (const overlay of document.querySelectorAll(".writing-bridge-ruled-page")) {
+      if (overlay instanceof HTMLElement) {
+        overlay.remove();
+      }
+    }
+
+    for (const overlay of document.querySelectorAll(".writing-bridge-excalidraw-ruled-page")) {
+      if (overlay instanceof HTMLElement) {
+        overlay.remove();
+      }
+    }
+
+    for (const button of document.querySelectorAll(".writing-bridge-ruled-toggle")) {
+      if (button instanceof HTMLElement) {
+        button.remove();
+      }
+    }
+
+    this.ruledPageStateByRootId.clear();
   }
 
   destroyRuledPageUi() {
@@ -1699,6 +2381,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   syncRuledPageToggles() {
+    if (!this.isFeatureEnabled("ruledPageFeatureEnabled")) {
+      this.destroyRuledPageDecorations();
+      return;
+    }
+
     const activeRoot = this.getTldrawTargetRoot(
       this.normalizeTldrawTarget(this.getTldrawTarget())
     );
@@ -1809,6 +2496,12 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   syncExcalidrawThemeMatching() {
+    if (!this.isFeatureEnabled("excalidrawThemeSyncEnabled")) {
+      this.clearExcalidrawThemeMatching();
+      this.syncExcalidrawEmbedEditButtons();
+      return;
+    }
+
     const desiredTheme = this.getObsidianThemeMode();
     // Excalidraw already has its own startup hook for the live editor theme.
     // The bridge stays on embed cleanup and bridge UI so the two paths do not fight.
@@ -1818,9 +2511,8 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   syncExcalidrawFloatingUi() {
+    this.syncExcalidrawRuledPageOverlays();
     this.syncExcalidrawRuledPageToggles();
-    // These actions live in normal document flow now, so there is nothing to
-    // chase during scroll here.
   }
 
   scheduleExcalidrawFloatingUiSync() {
@@ -1856,6 +2548,28 @@ module.exports = class WritingBridgePlugin extends Plugin {
     }
   }
 
+  handleExcalidrawViewportInteraction(event, durationMs = 320) {
+    const target = event?.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+
+    if (!target.closest('.workspace-leaf-content[data-type="excalidraw"], .excalidraw-view')) {
+      return;
+    }
+
+    if (
+      typeof PointerEvent !== "undefined" &&
+      event instanceof PointerEvent &&
+      event.type === "pointermove" &&
+      Number(event.buttons ?? 0) === 0
+    ) {
+      return;
+    }
+
+    this.beginExcalidrawFloatingUiTracking(durationMs);
+  }
+
   queueExcalidrawThemeSyncBurst(retries = 10, delayMs = 70) {
     const totalRetries = Math.max(1, Number.isFinite(retries) ? retries : 1);
     const nextDelayMs = Math.max(0, Number.isFinite(delayMs) ? delayMs : 0);
@@ -1871,6 +2585,13 @@ module.exports = class WritingBridgePlugin extends Plugin {
 
   syncExcalidrawThemeForRoot(root, desiredTheme = this.getObsidianThemeMode()) {
     if (!(root instanceof HTMLElement)) {
+      return;
+    }
+
+    // Bail out early when the feature is off – clean up any stale classes
+    // that a previous session might have left behind.
+    if (!this.isFeatureEnabled("excalidrawThemeSyncEnabled")) {
+      this.applyExcalidrawThemeClasses(root, desiredTheme, false);
       return;
     }
 
@@ -2057,6 +2778,12 @@ module.exports = class WritingBridgePlugin extends Plugin {
 
     const wrapper = this.findExcalidrawContainer(root);
     const host = this.findExcalidrawRuledPageHost(root);
+    // Only target the bridge's own shell elements – the workspace-leaf root,
+    // the excalidraw-wrapper, and the ruled-page host.  Do NOT reach into
+    // Excalidraw's internal React-managed elements (.excalidraw,
+    // .excalidraw-container, .layer-ui__wrapper, etc.) because forcing
+    // theme--dark / color-scheme on those elements fights with Excalidraw's
+    // own theme state and blacks out the canvas.
     const targets = new Set();
     const addTarget = (element) => {
       if (element instanceof HTMLElement) {
@@ -2068,32 +2795,20 @@ module.exports = class WritingBridgePlugin extends Plugin {
     addTarget(wrapper);
     addTarget(host);
 
-    const themeSelectors = [
-      ".excalidraw",
-      ".excalidraw-container",
-      ".layer-ui__wrapper",
-      ".App-toolbar-container",
-      ".App-menu_top",
-      ".FixedSideContainer",
-    ];
-    for (const selector of themeSelectors) {
-      for (const element of root.querySelectorAll(selector)) {
-        addTarget(element);
-      }
-    }
-
     const themeClass = desiredTheme === "dark" ? "theme--dark" : "theme--light";
     const oppositeThemeClass = desiredTheme === "dark" ? "theme--light" : "theme--dark";
 
     for (const element of targets) {
-      element.classList.remove(oppositeThemeClass);
       if (shouldMatch) {
+        element.classList.remove(oppositeThemeClass);
         element.classList.add("writing-bridge-excalidraw-force-theme", themeClass);
-        element.style.setProperty("color-scheme", desiredTheme);
-        element.dataset.tldrawPenBridgeTheme = desiredTheme;
+        element.dataset.writingBridgeTheme = desiredTheme;
       } else {
-        element.classList.remove("writing-bridge-excalidraw-force-theme", themeClass);
-        element.style.removeProperty("color-scheme");
+        element.classList.remove(
+          "writing-bridge-excalidraw-force-theme",
+          themeClass,
+          oppositeThemeClass
+        );
         element.removeAttribute("data-writing-bridge-theme");
       }
     }
@@ -2122,6 +2837,10 @@ module.exports = class WritingBridgePlugin extends Plugin {
       ) {
         row.remove();
       }
+    }
+
+    if (!this.isFeatureEnabled("excalidrawThemeSyncEnabled")) {
+      return;
     }
 
     for (const candidate of candidates) {
@@ -2798,7 +3517,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
     const host = this.findExcalidrawRuledPageHost(root);
     this.clearStaleExcalidrawRuledPageHosts(root, host);
     const existing = root.querySelector(".writing-bridge-excalidraw-ruled-page");
-    if (!(host instanceof HTMLElement) || !this.settings.ruledPageEnabled) {
+    if (
+      !(host instanceof HTMLElement) ||
+      !this.isFeatureEnabled("ruledPageFeatureEnabled") ||
+      !this.settings.ruledPageEnabled
+    ) {
       if (existing instanceof HTMLElement) {
         existing.remove();
       }
@@ -2910,6 +3633,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   syncExcalidrawRuledPageToggles() {
+    if (!this.isFeatureEnabled("ruledPageFeatureEnabled")) {
+      this.destroyExcalidrawRuledPageToggles();
+      return;
+    }
+
     const activeTarget = this.getCanvasTarget();
     const activeRoot =
       activeTarget?.kind === "excalidraw" ? this.getExcalidrawLeafRootForView(activeTarget.view) : null;
@@ -3221,6 +3949,10 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   getConfiguredTldrawDefaultDrawSize() {
+    if (!this.isFeatureEnabled("tldrawDefaultPenSizeEnabled")) {
+      return null;
+    }
+
     const size = this.settings?.tldrawDefaultDrawSize;
     return size && size !== "default" && TLDRAW_DRAW_SIZE_OPTIONS.includes(size) ? size : null;
   }
@@ -3308,6 +4040,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   syncStylePanelToggles() {
+    if (!this.isFeatureEnabled("stylePanelToggleEnabled")) {
+      this.destroyStylePanelToggles();
+      return;
+    }
+
     const liveRootIds = new Set();
     const roots = document.querySelectorAll(".tldraw-view-root");
     for (const root of roots) {
@@ -3435,6 +4172,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   async toggleStylePanelCollapsed() {
+    if (!this.isFeatureEnabled("stylePanelToggleEnabled")) {
+      this.showFeatureDisabledNotice("Canvas style panel toggle");
+      return;
+    }
+
     this.settings.stylePanelCollapsed = !this.settings.stylePanelCollapsed;
     await this.saveSettings();
     this.syncStylePanelToggles();
@@ -3461,6 +4203,15 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   refreshSelectionMenu() {
+    if (!this.isFeatureEnabled("selectionMenuEnabled")) {
+      this.lastActiveCanvasTarget = null;
+      this.lastActiveTldrawTarget = null;
+      this.selectionMenuState.lastSelectionKey = "";
+      this.selectionMenuState.dismissedSelectionKey = "";
+      this.hideSelectionMenu();
+      return;
+    }
+
     const target = this.getCanvasTarget();
     if (!target) {
       this.lastActiveCanvasTarget = null;
@@ -3510,6 +4261,12 @@ module.exports = class WritingBridgePlugin extends Plugin {
     }
 
     const menu = this.ensureSelectionMenu();
+    this.syncSelectionMenuButtons(menu);
+    const visibleButtons = Array.from(menu.querySelectorAll("button")).filter((button) => !button.hidden);
+    if (visibleButtons.length <= 1) {
+      this.hideSelectionMenu();
+      return;
+    }
     menu.setAttribute("data-selection-key", selectionKey);
     this.positionSelectionMenu(menu, bounds);
     menu.classList.add("is-visible");
@@ -3529,39 +4286,81 @@ module.exports = class WritingBridgePlugin extends Plugin {
         this.dismissSelectionMenu(menu);
         await this.copySelectedAsText(this.lastActiveCanvasTarget ?? this.getCanvasTarget());
       },
-      "writing-bridge-selection-menu__primary"
+      "writing-bridge-selection-menu__primary",
+      "copySelectedTextEnabled"
     );
-    const cutButton = this.createSelectionMenuButton("Cut", async () => {
-      this.dismissSelectionMenu(menu);
-      await this.cutSelectedContent(this.lastActiveCanvasTarget ?? this.getCanvasTarget());
-    });
-    const screenshotButton = this.createSelectionMenuButton("Screenshot", async () => {
-      this.dismissSelectionMenu(menu);
-      await this.copySelectedAsScreenshot(this.lastActiveCanvasTarget ?? this.getCanvasTarget());
-    });
-    const drawButton = this.createSelectionMenuButton("Draw", () => {
-      this.dismissSelectionMenu(menu);
-      this.runToolCommand("draw");
-    });
-    const panButton = this.createSelectionMenuButton("Pan", () => {
-      this.dismissSelectionMenu(menu);
-      this.runToolCommand("hand");
-    });
+    const cutButton = this.createSelectionMenuButton(
+      "Cut",
+      async () => {
+        this.dismissSelectionMenu(menu);
+        await this.cutSelectedContent(this.lastActiveCanvasTarget ?? this.getCanvasTarget());
+      },
+      "",
+      "copySelectedTextEnabled"
+    );
+    const screenshotButton = this.createSelectionMenuButton(
+      "Screenshot",
+      async () => {
+        this.dismissSelectionMenu(menu);
+        await this.copySelectedAsScreenshot(this.lastActiveCanvasTarget ?? this.getCanvasTarget());
+      },
+      "",
+      "selectionScreenshotEnabled"
+    );
+    const drawButton = this.createSelectionMenuButton(
+      "Draw",
+      () => {
+        this.dismissSelectionMenu(menu);
+        this.runToolCommand("draw");
+      },
+      "",
+      "toolCommandsEnabled"
+    );
+    const panButton = this.createSelectionMenuButton(
+      "Pan",
+      () => {
+        this.dismissSelectionMenu(menu);
+        this.runToolCommand("hand");
+      },
+      "",
+      "toolCommandsEnabled"
+    );
     const closeButton = this.createSelectionMenuButton("Close", () => {
       this.dismissSelectionMenu(menu);
     });
 
     menu.append(copyButton, cutButton, screenshotButton, drawButton, panButton, closeButton);
+    this.syncSelectionMenuButtons(menu);
     document.body.appendChild(menu);
     this.selectionMenuEl = menu;
     return menu;
   }
 
-  createSelectionMenuButton(label, onClick, extraClass = "") {
+  syncSelectionMenuButtons(menu) {
+    if (!(menu instanceof HTMLElement)) {
+      return;
+    }
+
+    for (const button of menu.querySelectorAll("button")) {
+      if (!(button instanceof HTMLButtonElement)) {
+        continue;
+      }
+
+      const featureKey = button.dataset.featureToggle;
+      const enabled = !featureKey || this.isFeatureEnabled(featureKey);
+      button.hidden = !enabled;
+      button.disabled = !enabled;
+    }
+  }
+
+  createSelectionMenuButton(label, onClick, extraClass = "", featureToggleKey = "") {
     const button = document.createElement("button");
     button.type = "button";
     button.className = extraClass;
     button.textContent = label;
+    if (featureToggleKey) {
+      button.dataset.featureToggle = featureToggleKey;
+    }
     let handledPointerUp = false;
 
     button.addEventListener("pointerdown", (event) => {
@@ -3602,6 +4401,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   runToolCommand(toolId) {
+    if (!this.isFeatureEnabled("toolCommandsEnabled")) {
+      this.showFeatureDisabledNotice("Canvas tool commands");
+      return;
+    }
+
     const command = TOOL_COMMANDS.find((entry) => entry.toolId === toolId);
     const target = this.lastActiveCanvasTarget ?? this.getCanvasTarget();
     if (!command || !target) {
@@ -3624,7 +4428,7 @@ module.exports = class WritingBridgePlugin extends Plugin {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`cut snapshot failed: ${message}`);
-      new Notice("Cut text failed");
+      new Notice(this.getFailureNoticeMessage("Cut text", error));
       return;
     }
 
@@ -3641,10 +4445,12 @@ module.exports = class WritingBridgePlugin extends Plugin {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`cut clipboard write failed: ${message}`);
+      new Notice(this.getFailureNoticeMessage("Cut text", error));
+      return;
     }
 
     if (!didWrite) {
-      new Notice("Cut text failed");
+      new Notice("Cut text failed: no text could be recognized");
       return;
     }
 
@@ -4065,6 +4871,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   async copySelectedAsText(target) {
+    if (!this.isFeatureEnabled("copySelectedTextEnabled")) {
+      this.showFeatureDisabledNotice("Copy selected as text");
+      return false;
+    }
+
     const now = Date.now();
     if (this.copyInFlight || now - this.lastCopyStartedAt < COPY_DEBOUNCE_MS) {
       this.log("copy skipped: already running or recently triggered");
@@ -4134,7 +4945,7 @@ module.exports = class WritingBridgePlugin extends Plugin {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`copy failed: ${message}`);
-      new Notice("Copy selected as text failed");
+      new Notice(this.getFailureNoticeMessage("Copy selected as text", error));
       return false;
     } finally {
       this.copyInFlight = false;
@@ -4142,6 +4953,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   async copySelectedAsScreenshot(target) {
+    if (!this.isFeatureEnabled("selectionScreenshotEnabled")) {
+      this.showFeatureDisabledNotice("Copy selected screenshot");
+      return;
+    }
+
     if (this.screenshotInFlight) {
       this.log("screenshot skipped: already running");
       return;
@@ -4182,7 +4998,7 @@ module.exports = class WritingBridgePlugin extends Plugin {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`screenshot failed: ${message}`);
-      new Notice("Copy selected screenshot failed");
+      new Notice(this.getFailureNoticeMessage("Copy selected screenshot", error));
     } finally {
       this.screenshotInFlight = false;
     }
@@ -5280,16 +6096,22 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   async extractBlobTextWithOcr(blob) {
+    const failures = [];
+
     for (const provider of this.getPreferredVisionProviders()) {
+      const providerLabel = this.getVisionProviderLabel(provider);
       try {
         const text = await this.extractBlobTextWithPreferredVisionProvider(blob, provider);
         if (this.normalizeCopiedText(text)) {
           this.log(`ocr backend=${provider}`);
           return text;
         }
+
+        this.pushFailureDetail(failures, providerLabel, "returned an empty transcription");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.log(`${provider} vision failed: ${message}`);
+        this.pushFailureDetail(failures, providerLabel, error);
       }
     }
 
@@ -5301,9 +6123,12 @@ module.exports = class WritingBridgePlugin extends Plugin {
           this.log("ocr backend=mistral-vision");
           return text;
         }
+
+        this.pushFailureDetail(failures, "Mistral vision", "returned an empty transcription");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.log(`mistral vision failed: ${message}`);
+        this.pushFailureDetail(failures, "Mistral vision", error);
       }
 
       try {
@@ -5312,16 +6137,20 @@ module.exports = class WritingBridgePlugin extends Plugin {
           this.log("ocr backend=mistral");
           return text;
         }
+
+        this.pushFailureDetail(failures, "Mistral OCR", "returned an empty transcription");
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.log(`mistral ocr failed: ${message}`);
+        this.pushFailureDetail(failures, "Mistral OCR", error);
       }
     }
 
     const textExtractor = this.app?.plugins?.plugins?.[TEXT_EXTRACTOR_PLUGIN_ID];
     const extractText = textExtractor?.api?.extractText;
     if (typeof extractText !== "function") {
-      throw new Error("Text Extractor plugin is not available");
+      this.pushFailureDetail(failures, "Text Extractor", "plugin is not available");
+      throw new Error(`OCR transcription failed: ${failures.join("; ")}`);
     }
 
     const file = await this.writeTempExport(blob);
@@ -5329,13 +6158,21 @@ module.exports = class WritingBridgePlugin extends Plugin {
 
     try {
       const text = await extractText.call(textExtractor.api, file);
-      await this.clearTextExtractorCache(file.path);
-      this.log("ocr backend=text-extractor");
-      return text;
+      if (this.normalizeCopiedText(text)) {
+        this.log("ocr backend=text-extractor");
+        return text;
+      }
+
+      this.pushFailureDetail(failures, "Text Extractor", "returned no text");
     } catch (error) {
+      this.pushFailureDetail(failures, "Text Extractor", error);
+    } finally {
       await this.clearTextExtractorCache(file.path);
-      throw error;
     }
+
+    throw new Error(
+      `OCR transcription failed: ${failures.join("; ") || "no transcription backend returned any text"}`
+    );
   }
 
   async extractBlobTextWithPreferredVisionProvider(blob, provider) {
@@ -5357,38 +6194,80 @@ module.exports = class WritingBridgePlugin extends Plugin {
       return this.extractSelectionTextWithOpenRouter(blob, apiKey);
     }
 
+    if (provider === VISION_PROVIDER_CUSTOM) {
+      const baseUrl = this.getConfiguredCustomOpenAiBaseUrl();
+      if (!baseUrl) {
+        throw new Error("Custom OpenAI base URL is not configured");
+      }
+
+      const model = this.getConfiguredCustomOpenAiModel();
+      if (!model) {
+        throw new Error("Custom OpenAI model is not configured");
+      }
+
+      return this.extractSelectionTextWithCustomOpenAi(
+        blob,
+        baseUrl,
+        this.getConfiguredCustomOpenAiApiKey(),
+        model
+      );
+    }
+
     throw new Error(`Unsupported vision provider: ${provider}`);
   }
 
   getPreferredVisionProviders() {
-    const orderedProviders = [];
     const preferred = this.getConfiguredVisionProvider();
-    const hasGemini = Boolean(this.getConfiguredGeminiApiKey());
-    const hasOpenRouter = Boolean(this.getConfiguredOpenRouterApiKey());
-
-    if (preferred === VISION_PROVIDER_GEMINI) {
-      if (hasGemini) {
-        orderedProviders.push(VISION_PROVIDER_GEMINI);
+    const ordered = [preferred, ...VISION_PROVIDERS.filter((p) => p !== preferred)];
+    const seen = new Set();
+    const result = [];
+    for (const provider of ordered) {
+      if (seen.has(provider)) {
+        continue;
       }
-      if (hasOpenRouter) {
-        orderedProviders.push(VISION_PROVIDER_OPENROUTER);
-      }
-    } else {
-      if (hasOpenRouter) {
-        orderedProviders.push(VISION_PROVIDER_OPENROUTER);
-      }
-      if (hasGemini) {
-        orderedProviders.push(VISION_PROVIDER_GEMINI);
+      seen.add(provider);
+      if (this.isVisionProviderConfigured(provider)) {
+        result.push(provider);
       }
     }
+    return result;
+  }
 
-    return orderedProviders;
+  isVisionProviderConfigured(provider) {
+    if (provider === VISION_PROVIDER_OPENROUTER) {
+      return Boolean(this.getConfiguredOpenRouterApiKey());
+    }
+
+    if (provider === VISION_PROVIDER_GEMINI) {
+      return Boolean(this.getConfiguredGeminiApiKey());
+    }
+
+    if (provider === VISION_PROVIDER_CUSTOM) {
+      return Boolean(this.getConfiguredCustomOpenAiBaseUrl()) && Boolean(this.getConfiguredCustomOpenAiModel());
+    }
+
+    return false;
   }
 
   getConfiguredVisionProvider() {
-    return this.settings?.visionLlmProvider === VISION_PROVIDER_GEMINI
-      ? VISION_PROVIDER_GEMINI
-      : VISION_PROVIDER_OPENROUTER;
+    const value = this.settings?.visionLlmProvider;
+    return VISION_PROVIDERS.includes(value) ? value : VISION_PROVIDER_OPENROUTER;
+  }
+
+  getVisionProviderLabel(provider) {
+    if (provider === VISION_PROVIDER_GEMINI) {
+      return "Gemini";
+    }
+
+    if (provider === VISION_PROVIDER_OPENROUTER) {
+      return "OpenRouter";
+    }
+
+    if (provider === VISION_PROVIDER_CUSTOM) {
+      return "Custom OpenAI";
+    }
+
+    return String(provider ?? "Unknown provider");
   }
 
   getConfiguredOpenRouterApiKey() {
@@ -5433,6 +6312,57 @@ module.exports = class WritingBridgePlugin extends Plugin {
     const value =
       typeof this.settings?.geminiModel === "string" ? this.settings.geminiModel.trim() : "";
     return value !== "" ? value : GEMINI_DEFAULT_MODEL;
+  }
+
+  getConfiguredCustomOpenAiBaseUrl() {
+    const fromSettings =
+      typeof this.settings?.customOpenAiBaseUrl === "string" ? this.settings.customOpenAiBaseUrl.trim() : "";
+    if (fromSettings !== "") {
+      return fromSettings;
+    }
+
+    const envValue =
+      typeof process?.env?.CUSTOM_OPENAI_BASE_URL === "string"
+        ? process.env.CUSTOM_OPENAI_BASE_URL.trim()
+        : "";
+    return envValue !== "" ? envValue : null;
+  }
+
+  getConfiguredCustomOpenAiApiKey() {
+    const fromSettings =
+      typeof this.settings?.customOpenAiApiKey === "string" ? this.settings.customOpenAiApiKey.trim() : "";
+    if (fromSettings !== "") {
+      return fromSettings;
+    }
+
+    const envValue =
+      typeof process?.env?.CUSTOM_OPENAI_API_KEY === "string"
+        ? process.env.CUSTOM_OPENAI_API_KEY.trim()
+        : "";
+    return envValue !== "" ? envValue : null;
+  }
+
+  getConfiguredCustomOpenAiModel() {
+    const value =
+      typeof this.settings?.customOpenAiModel === "string" ? this.settings.customOpenAiModel.trim() : "";
+    return value !== "" ? value : null;
+  }
+
+  resolveCustomOpenAiChatCompletionsUrl(baseUrl) {
+    const trimmed = String(baseUrl ?? "").trim().replace(/\/+$/, "");
+    if (trimmed === "") {
+      throw new Error("Custom OpenAI base URL is not configured");
+    }
+
+    if (/\/chat\/completions$/i.test(trimmed)) {
+      return trimmed;
+    }
+
+    if (/\/v\d+(?:beta\d*)?$/i.test(trimmed)) {
+      return `${trimmed}/chat/completions`;
+    }
+
+    return `${trimmed}/v1/chat/completions`;
   }
 
   getConfiguredMistralApiKey() {
@@ -5632,6 +6562,63 @@ module.exports = class WritingBridgePlugin extends Plugin {
     throw new Error("OpenRouter response did not contain text");
   }
 
+  async extractSelectionTextWithCustomOpenAi(blob, baseUrl, apiKey, model) {
+    const arrayBuffer = await blob.arrayBuffer();
+    const base64Image = Buffer.from(arrayBuffer).toString("base64");
+    const dataUrl = `data:image/png;base64,${base64Image}`;
+    const url = this.resolveCustomOpenAiChatCompletionsUrl(baseUrl);
+
+    const headers = { "Content-Type": "application/json" };
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+    }
+
+    const response = await this.requestJson(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model,
+        temperature: 0,
+        max_tokens: 600,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: this.getVisionTranscriptionPrompt(),
+              },
+              {
+                type: "image_url",
+                image_url: { url: dataUrl },
+              },
+            ],
+          },
+        ],
+      }),
+    });
+
+    const firstChoice = Array.isArray(response?.choices) ? response.choices[0] : null;
+    const content = firstChoice?.message?.content;
+    if (typeof content === "string") {
+      return content;
+    }
+
+    if (Array.isArray(content)) {
+      return content
+        .map((item) => {
+          if (typeof item === "string") {
+            return item;
+          }
+
+          return typeof item?.text === "string" ? item.text : "";
+        })
+        .join("\n");
+    }
+
+    throw new Error("Custom OpenAI response did not contain text");
+  }
+
   async extractSelectionTextWithMistral(blob, apiKey) {
     const fileId = await this.uploadMistralOcrFile(blob, apiKey);
 
@@ -5666,18 +6653,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   getVisionTranscriptionPrompt() {
-    return [
-      "Transcribe the handwritten note or math in this image exactly.",
-      "Preserve line breaks where they are visually obvious.",
-      "Prefer the literal reading over cleanup or interpretation.",
-      "If the selection is math, format it as readable linear math for pasting into a normal text box such as Excalidraw.",
-      "Do not use LaTeX commands, LaTeX delimiters, or markdown math fencing.",
-      "Prefer common math symbols such as ≤, ≥, ≠, ≈, √, ×, ÷, π, θ, ∑, ∫, and → when they are clearly intended.",
-      "Use simple unicode superscripts like ² and ³ when obvious and compact; otherwise use ^ and _ only when needed.",
-      "Keep fractions, exponents, limits, and equations easy to read in plain pasted text.",
-      "Do not explain, solve, normalize, or summarize.",
-      "Output only the transcription."
-    ].join(" ");
+    const configuredPrompt =
+      typeof this.settings?.visionTranscriptionPrompt === "string"
+        ? this.settings.visionTranscriptionPrompt.trim()
+        : "";
+    return configuredPrompt !== "" ? configuredPrompt : DEFAULT_VISION_TRANSCRIPTION_PROMPT;
   }
 
   async uploadMistralOcrFile(blob, apiKey) {
@@ -5753,8 +6733,16 @@ module.exports = class WritingBridgePlugin extends Plugin {
           ? parsedBody.message
           : typeof parsedBody?.error === "string"
             ? parsedBody.error
-            : bodyText || `${response.status} ${response.statusText}`;
-      throw new Error(message);
+            : typeof parsedBody?.error?.message === "string"
+              ? parsedBody.error.message
+              : typeof parsedBody?.detail === "string"
+                ? parsedBody.detail
+                : typeof parsedBody?.details === "string"
+                  ? parsedBody.details
+                  : "";
+      const statusMessage = `${response.status} ${response.statusText}`.trim();
+      const detail = message || bodyText;
+      throw new Error(detail ? `HTTP ${statusMessage}: ${detail}` : `HTTP ${statusMessage}`);
     }
 
     return parsedBody;
@@ -5900,6 +6888,11 @@ module.exports = class WritingBridgePlugin extends Plugin {
   }
 
   syncTldrawEmbedPreviewFormats() {
+    if (!this.isFeatureEnabled("tldrawEmbedPreviewBridgeEnabled")) {
+      this.restoreTldrawEmbedPreviewSourceUrls();
+      return;
+    }
+
     const format = this.settings?.tldrawEmbedPreviewFormat ?? DEFAULT_SETTINGS.tldrawEmbedPreviewFormat;
     if (format !== "png") {
       this.restoreTldrawEmbedPreviewSourceUrls();
@@ -6048,20 +7041,60 @@ module.exports = class WritingBridgePlugin extends Plugin {
     return normalized === "" ? null : normalized;
   }
 
+  getErrorMessage(error) {
+    if (error instanceof Error && typeof error.message === "string" && error.message.trim() !== "") {
+      return error.message.trim();
+    }
+
+    if (typeof error === "string" && error.trim() !== "") {
+      return error.trim();
+    }
+
+    return "Unknown error";
+  }
+
+  wrapErrorWithContext(context, error) {
+    return new Error(`${context}: ${this.getErrorMessage(error)}`);
+  }
+
+  getFailureNoticeMessage(operation, error, maxLength = 220) {
+    const detail = this.getErrorMessage(error).replace(/\s+/g, " ").trim();
+    const message = `${operation} failed${detail ? `: ${detail}` : ""}`;
+    return message.length <= maxLength ? message : `${message.slice(0, maxLength - 1)}…`;
+  }
+
+  pushFailureDetail(failures, label, errorOrMessage) {
+    if (!Array.isArray(failures)) {
+      return;
+    }
+
+    const detail =
+      typeof errorOrMessage === "string" ? errorOrMessage.trim() : this.getErrorMessage(errorOrMessage);
+    failures.push(detail ? `${label}: ${detail}` : label);
+  }
+
   async writeClipboardText(text) {
-    const { clipboard } = require("electron");
-    await clipboard.writeText(text);
+    try {
+      const { clipboard } = require("electron");
+      await clipboard.writeText(text);
+    } catch (error) {
+      throw this.wrapErrorWithContext("Clipboard text write failed", error);
+    }
   }
 
   async writeClipboardImage(blob) {
-    const arrayBuffer = await blob.arrayBuffer();
-    const { clipboard, nativeImage } = require("electron");
-    const image = nativeImage.createFromBuffer(Buffer.from(arrayBuffer));
-    if (typeof image?.isEmpty === "function" && image.isEmpty()) {
-      throw new Error("selection screenshot export produced an empty image");
-    }
+    try {
+      const arrayBuffer = await blob.arrayBuffer();
+      const { clipboard, nativeImage } = require("electron");
+      const image = nativeImage.createFromBuffer(Buffer.from(arrayBuffer));
+      if (typeof image?.isEmpty === "function" && image.isEmpty()) {
+        throw new Error("selection screenshot export produced an empty image");
+      }
 
-    clipboard.writeImage(image);
+      clipboard.writeImage(image);
+    } catch (error) {
+      throw this.wrapErrorWithContext("Clipboard image write failed", error);
+    }
   }
 
   getVaultAbsolutePath(vaultRelativePath) {
@@ -6147,12 +7180,12 @@ module.exports = class WritingBridgePlugin extends Plugin {
     }
 
     const selectors = [
-      '.workspace-leaf-content[data-type="excalidraw"] .excalidraw-wrapper',
-      ".excalidraw-view .excalidraw-wrapper",
-      ".excalidraw-wrapper",
       '.workspace-leaf-content[data-type="excalidraw"] .excalidraw__canvas-wrapper',
       ".excalidraw-view .excalidraw__canvas-wrapper",
       ".excalidraw__canvas-wrapper",
+      '.workspace-leaf-content[data-type="excalidraw"] .excalidraw-wrapper',
+      ".excalidraw-view .excalidraw-wrapper",
+      ".excalidraw-wrapper",
     ];
 
     for (const selector of selectors) {
@@ -6442,6 +7475,151 @@ class WritingBridgeSettingTab extends PluginSettingTab {
       geminiModelOptions[currentGeminiModel] = `${currentGeminiModel} (current)`;
     }
 
+    containerEl.createEl("h3", { text: "Feature toggles" });
+
+    new Setting(containerEl)
+      .setName("Enable tool hotkeys and commands")
+      .setDesc("Draw, Select, and Hand tool commands and the matching quick-action menu buttons.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.isFeatureEnabled("toolCommandsEnabled")).onChange(async (value) => {
+          this.plugin.settings.toolCommandsEnabled = value;
+          await this.plugin.saveSettings();
+          this.plugin.destroySelectionMenu();
+          this.plugin.refreshSelectionMenu();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enable copy selected as text")
+      .setDesc("Allow OCR or direct text copy from canvas selections, plus the Copy and Cut buttons in the floating selection menu.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.isFeatureEnabled("copySelectedTextEnabled")).onChange(async (value) => {
+          this.plugin.settings.copySelectedTextEnabled = value;
+          await this.plugin.saveSettings();
+          this.plugin.destroySelectionMenu();
+          this.plugin.refreshSelectionMenu();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enable selection screenshot copy")
+      .setDesc("Allow copying the current canvas selection as an image and show the Screenshot button in the floating selection menu.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.isFeatureEnabled("selectionScreenshotEnabled")).onChange(async (value) => {
+          this.plugin.settings.selectionScreenshotEnabled = value;
+          await this.plugin.saveSettings();
+          this.plugin.destroySelectionMenu();
+          this.plugin.refreshSelectionMenu();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enable region screenshots")
+      .setDesc("Allow region screenshot commands, including the scrolling-region capture helpers.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.isFeatureEnabled("regionScreenshotEnabled")).onChange(async (value) => {
+          this.plugin.settings.regionScreenshotEnabled = value;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enable floating selection menu")
+      .setDesc("Show the bubble menu over active tldraw and Excalidraw selections.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.isFeatureEnabled("selectionMenuEnabled")).onChange(async (value) => {
+          this.plugin.settings.selectionMenuEnabled = value;
+          await this.plugin.saveSettings();
+          if (!value) {
+            this.plugin.hideSelectionMenu();
+          }
+          this.plugin.destroySelectionMenu();
+          this.plugin.refreshSelectionMenu();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enable canvas style panel toggle")
+      .setDesc("Show the pull-tab that collapses or opens the floating style and action panels.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.isFeatureEnabled("stylePanelToggleEnabled")).onChange(async (value) => {
+          this.plugin.settings.stylePanelToggleEnabled = value;
+          await this.plugin.saveSettings();
+          this.plugin.syncStylePanelToggles();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enable ruled page overlay")
+      .setDesc("Show notebook lines, line toggle buttons, and the ruled-page command on supported canvases.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.isFeatureEnabled("ruledPageFeatureEnabled")).onChange(async (value) => {
+          this.plugin.settings.ruledPageFeatureEnabled = value;
+          await this.plugin.saveSettings();
+          this.plugin.syncRuledPageOverlays();
+          this.plugin.syncRuledPageToggles();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enable sidebar pen assist")
+      .setDesc("Replay missed pen taps on sidebars, ribbons, and tab chrome.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.isFeatureEnabled("sidebarPenAssistEnabled")).onChange(async (value) => {
+          this.plugin.settings.sidebarPenAssistEnabled = value;
+          this.plugin.sidebarPenTapState = null;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enable default tldraw pen size")
+      .setDesc("Auto-apply the configured tldraw draw size when a canvas first becomes active.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.isFeatureEnabled("tldrawDefaultPenSizeEnabled")).onChange(async (value) => {
+          this.plugin.settings.tldrawDefaultPenSizeEnabled = value;
+          this.plugin.appliedTldrawDrawSizeByRootId.clear();
+          await this.plugin.saveSettings();
+          this.plugin.syncRuledPageOverlays();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enable Excalidraw theme sync")
+      .setDesc("Apply the bridge's Excalidraw theme matching, themed export swapping, and embed edit affordances.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.isFeatureEnabled("excalidrawThemeSyncEnabled")).onChange(async (value) => {
+          this.plugin.settings.excalidrawThemeSyncEnabled = value;
+          await this.plugin.saveSettings();
+          this.plugin.syncExcalidrawThemeMatching();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enable default Excalidraw zoom")
+      .setDesc("Auto-apply the configured Excalidraw zoom when a leaf first opens in this session.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.isFeatureEnabled("excalidrawDefaultZoomEnabled")).onChange(async (value) => {
+          this.plugin.settings.excalidrawDefaultZoomEnabled = value;
+          this.plugin.appliedExcalidrawZoomLeaves = new WeakSet();
+          await this.plugin.saveSettings();
+          this.plugin.syncExcalidrawDefaultZoom();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Enable tldraw embed preview conversion")
+      .setDesc("Convert tldraw markdown embeds to bridge-managed PNG previews when that format is selected.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.isFeatureEnabled("tldrawEmbedPreviewBridgeEnabled")).onChange(async (value) => {
+          this.plugin.settings.tldrawEmbedPreviewBridgeEnabled = value;
+          await this.plugin.saveSettings();
+          this.plugin.syncTldrawEmbedPreviewFormats();
+        })
+      );
+
+    containerEl.createEl("h3", { text: "Behavior settings" });
+
     new Setting(containerEl)
       .setName("Default tldraw pen size")
       .setDesc("Apply this draw size when a tldraw canvas first becomes active. You can still change it manually after that.")
@@ -6511,6 +7689,21 @@ class WritingBridgeSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Default Excalidraw zoom")
+      .setDesc("Apply this zoom the first time each Excalidraw leaf opens this session. Accepts a ratio (e.g. 1.5) or a percent (e.g. 150%). Leave blank to use Excalidraw's own zoom.")
+      .addText((text) =>
+        text
+          .setPlaceholder("e.g. 1.5 or 150%")
+          .setValue(this.plugin.settings.excalidrawDefaultZoom ?? "")
+          .onChange(async (value) => {
+            this.plugin.settings.excalidrawDefaultZoom = value;
+            await this.plugin.saveSettings();
+            this.plugin.appliedExcalidrawZoomLeaves = new WeakSet();
+            this.plugin.syncExcalidrawDefaultZoom();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Collapse canvas style panel by default")
       .setDesc("Hide the floating style/actions panel until you click the pull-tab toggle.")
       .addToggle((toggle) =>
@@ -6522,12 +7715,28 @@ class WritingBridgeSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("AI transcription prompt")
+      .setDesc("Custom instructions for handwriting and math copy-to-text. Leave blank to use the built-in prompt.")
+      .addTextArea((text) => {
+        text
+          .setPlaceholder(DEFAULT_VISION_TRANSCRIPTION_PROMPT)
+          .setValue(this.plugin.settings.visionTranscriptionPrompt ?? "")
+          .onChange(async (value) => {
+            this.plugin.settings.visionTranscriptionPrompt = value;
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.rows = 6;
+        text.inputEl.cols = 36;
+      });
+
+    new Setting(containerEl)
       .setName("Primary image LLM provider")
-      .setDesc("Use this provider first for handwriting and math image transcription before older OCR fallbacks.")
+      .setDesc("Use this provider first for handwriting and math image transcription. The other providers run as fallbacks in declared order.")
       .addDropdown((dropdown) =>
         dropdown
           .addOption(VISION_PROVIDER_OPENROUTER, "OpenRouter")
           .addOption(VISION_PROVIDER_GEMINI, "Gemini")
+          .addOption(VISION_PROVIDER_CUSTOM, "Custom OpenAI-compatible")
           .setValue(this.plugin.getConfiguredVisionProvider())
           .onChange(async (value) => {
             this.plugin.settings.visionLlmProvider = value;
@@ -6589,5 +7798,44 @@ class WritingBridgeSettingTab extends PluginSettingTab {
         text.inputEl.rows = 4;
         text.inputEl.cols = 36;
       });
+
+    new Setting(containerEl)
+      .setName("Custom OpenAI-compatible base URL")
+      .setDesc("Full /chat/completions URL for any OpenAI-compatible vision endpoint. The bridge will append /v1/chat/completions if you only paste the host.")
+      .addText((text) =>
+        text
+          .setPlaceholder("https://api.openai.com/v1/chat/completions")
+          .setValue(this.plugin.settings.customOpenAiBaseUrl ?? "")
+          .onChange(async (value) => {
+            this.plugin.settings.customOpenAiBaseUrl = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Custom OpenAI-compatible API key")
+      .setDesc("Sent as a Bearer token. Leave blank for endpoints that do not require authentication.")
+      .addText((text) =>
+        text
+          .setPlaceholder("sk-... (optional)")
+          .setValue(this.plugin.settings.customOpenAiApiKey ?? "")
+          .onChange(async (value) => {
+            this.plugin.settings.customOpenAiApiKey = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Custom OpenAI-compatible model")
+      .setDesc("Model name to send in the chat completion request, e.g. gpt-4o-mini or your local model id.")
+      .addText((text) =>
+        text
+          .setPlaceholder("gpt-4o-mini")
+          .setValue(this.plugin.settings.customOpenAiModel ?? "")
+          .onChange(async (value) => {
+            this.plugin.settings.customOpenAiModel = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
   }
 }

@@ -1,7 +1,7 @@
 {
   "id": "writing-bridge",
   "name": "writing bridge",
-  "version": "0.5.12",
+  "version": "0.5.14",
   "minAppVersion": "1.7.7",
   "description": "Pen-friendly selection helpers, screenshot export, ruled lines, stroke recognition, and image transcription for Obsidian canvas plugins.",
   "author": "Maws",
